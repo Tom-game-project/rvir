@@ -4,6 +4,63 @@ use crate::unit::size::Byte;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VReg(pub usize);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhysReg {
+    T0, T1, T2, T3, T4, T5, T6,
+    S1, S2, // ...
+    A0, A1, // ...
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Location {
+    Register(PhysReg),
+    StackOffset(i32), // frame offset
+}
+
+pub struct VRegData {
+    pub v_reg: VReg,
+    pub name: String,
+    pub size: Byte,
+    pub location: Option<Location> // TODO
+                                   // in the future, I try to optimize this alloc by using register
+}
+
+pub struct VregArena {
+    pub regs: Vec<VRegData>
+}
+
+impl VregArena {
+
+    fn new() -> Self {
+        Self { regs: Vec::new() }
+    }
+
+    pub fn alloc(&mut self, size: Byte, name: Option<String>) -> VReg {
+        let v_reg = VReg(self.regs.len());
+        let data = VRegData {
+            v_reg,
+            name: name.expect("name does not set"),
+            size,
+            location: None,
+        };
+        self.regs.push(data);
+        v_reg
+    }
+
+    pub fn assign_locations(&mut self) -> Byte {
+        todo!()
+    }
+
+    pub fn get_location(&self, vreg: VReg) -> Option<&Location> {
+        self
+            .regs
+            .iter()
+            .find(|a| a.v_reg == vreg)?
+            .location
+            .as_ref()
+    }
+}
+
 // function identifer
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FuncId (pub usize);
@@ -44,9 +101,10 @@ pub enum Instruction {
         src: Operand,
     },
 
+    // dest = func(operand...);
     Call {
         dest: Option<Dest>,
-        func_name: Func,
+        func: Func,
         args: Vec<Operand>,
     },
 
@@ -75,11 +133,13 @@ pub struct RvIR (pub Vec<Instruction>);
 
 // Func Definition
 pub struct FuncDef {
-    name: String, // name of function
+    pub name: String, // name of function
     func_id: FuncId,
     pub arg_size: Byte,
     pub local_size: Byte, // local value size
-    ir: RvIR,
+
+    pub vreg_manager: VregArena,
+    pub ir: RvIR,
 }
 
 impl FuncDef {
@@ -89,6 +149,7 @@ impl FuncDef {
             arg_size,
             local_size,
             func_id,
+            vreg_manager: VregArena { regs: vec![] },
             ir: RvIR(vec![])
         }
     }
@@ -118,4 +179,15 @@ pub struct ModuleContext {
     pub fn get_func(&self, id: FuncId) -> &FuncDef {
         &self.funcs[id.0]
     }
+}
+
+
+#[cfg(test)]
+mod ir_ir_test {
+    use crate::*;
+
+    // #[test]
+    // fn test00 (){
+    // 
+    // }
 }
