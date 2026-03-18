@@ -3,13 +3,13 @@ use std::ops::Add;
 
 // basic size definitions
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BitUnit;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ByteUnit;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size<Unit> {
     pub value: u64,
     _marker: PhantomData<Unit>
