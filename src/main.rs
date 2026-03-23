@@ -25,10 +25,13 @@ mod test {
 
         // other function definitions ...
 
-        let instruction = vec![
+        let instruction: Vec<Instruction> = vec![
         ];
 
-        mod_ctx.get_func_mut(func_id).set_ir(RvIR(instruction));
+        mod_ctx
+            .get_func_mut(func_id)
+            .expect("failed to get function")
+            .set_ir(RvIR(instruction));
 
         // let asm = codegen(&mod_ctx);
         // println!("{}", asm);

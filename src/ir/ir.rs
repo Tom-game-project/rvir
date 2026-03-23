@@ -1,8 +1,19 @@
-use crate::unit::size::{Byte, Size};
+use crate::unit::size::Byte;
 
 // vertual register
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VReg(pub usize);
+
+pub trait RegisterAllocator {
+    /// Analyze the IR and argument information, and assign a Location to every VReg in VregArena.
+    /// It returns the final 16-byte-aligned stack size.
+    fn allocate(
+        &mut self,
+        ir: &RvIR,
+        arena: &mut VregArena,
+        args: &[VReg],
+    ) -> Byte;
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
@@ -25,78 +36,8 @@ impl ConstValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PhysReg {
-    T0/*Reserved*/, T1, T2, T3, T4, T5, T6, // temp reg
-    S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, // save reg
-    A0, A1, A2, A3, A4, A5, A6, A7, // function args
-}
 
-impl PhysReg {
-    fn get_reg_name(&self) -> &'static str {
-        match &self {
-            Self::T0 => "t0",
-            Self::T1 => "t1",
-            Self::T2 => "t2",
-            Self::T3 => "t3",
-            Self::T4 => "t4",
-            Self::T5 => "t5",
-            Self::T6 => "t6",
-            Self::S1 => "s1",
-            Self::S2 => "s2",
-            Self::S3 => "s3",
-            Self::S4 => "s4",
-            Self::S5 => "s5",
-            Self::S6 => "s6",
-            Self::S7 => "s7",
-            Self::S8 => "s8",
-            Self::S9 => "s9",
-            Self::S10 => "s10",
-            Self::S11 => "s11",
-            Self::A0 => "a0", // return value
-            Self::A1 => "a1", // return value
-            Self::A2 => "a2",
-            Self::A3 => "a3",
-            Self::A4 => "a4",
-            Self::A5 => "a5",
-            Self::A6 => "a6",
-            Self::A7 => "a7",
-        }
-    }
-
-    /// 
-    pub fn gen_load_asm(&self, location: &Location) -> Result<String, GenAsmErr> {
-        match location {
-            Location::Register(reg) => {
-                Ok(format!("mv {}, {}\n", self.get_reg_name(), reg.get_reg_name()))
-            }
-            Location::Stack(other_stack) => {
-                if other_stack.size == Size::new(4) {
-                    Ok(format!("lw {}, {}", self.get_reg_name(), other_stack.offset.gen_asm()))
-                } else if other_stack.size == Size::new(8) {
-                    Ok(format!("ld {}, {}", self.get_reg_name(), other_stack.offset.gen_asm()))
-                } else {
-                    Err(GenAsmErr::UnsupportedByteAlignment)
-                }
-            }
-        }
-    }
-
-    pub fn gen_load_immediate(&self, const_val: &ConstValue) -> String {
-        match const_val {
-            ConstValue::I32(a) => 
-                format!("li {}, {}", self.get_reg_name(), a),
-            ConstValue::I64(a) => 
-                format!("li {}, {}", self.get_reg_name(), a),
-            ConstValue::U32(a) => 
-                format!("li {}, {}", self.get_reg_name(), a),
-            ConstValue::U64(a) => 
-                format!("li {}, {}", self.get_reg_name(), a),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BasePointer {
     Sp(i32), // stack pointer
     Fp(i32), // frame pointer
@@ -109,72 +50,33 @@ impl BasePointer {
             BasePointer::Fp(offset) => format!("{}(fp)", offset),
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhysStack {
-    offset: BasePointer,
-    size: Byte       // 4 byte or 8 byte
-}
-
-impl PhysStack {
-    pub fn new(offset: BasePointer, size:Byte) -> Self {
-        Self { offset, size }
-    }
-
-    pub fn gen_load_asm(&self, location: &Location) -> Result<String, GenAsmErr> {
-        match location {
-            Location::Stack(other_stack) => {
-                if self.size == Size::new(4) {
-                    Ok(
-                        format!("lw t0, {}\n",  other_stack.offset.gen_asm()) +
-                        &format!("sw t0, {}", self.offset.gen_asm())
-                    )
-                } else if self.size == Size::new(8) {
-                    Ok(
-                        format!("ld t0, {}\n",  other_stack.offset.gen_asm()) +
-                        &format!("sd t0, {}", self.offset.gen_asm())
-                    )
-                } else {
-                    return Err(GenAsmErr::UnsupportedByteAlignment)
-                }
-            }
-            Location::Register(other_reg) => {
-                if self.size == Size::new(4) {
-                    Ok(format!("sw {}, {}", other_reg.get_reg_name(), self.offset.gen_asm()))
-                } else if self.size == Size::new(8) {
-                    Ok(format!("sd {}, {}", other_reg.get_reg_name(), self.offset.gen_asm()))
-                } else {
-                    return Err(GenAsmErr::UnsupportedByteAlignment)
-                }
-            }
-        }
-    }
-
-    pub fn gen_load_immediate (&self, const_val: &ConstValue) -> String {
-        match const_val {
-            ConstValue::I32(a) => 
-                format!("li t0, {}", a) + 
-                &format!("sw t0, {}", self.offset.gen_asm()),
-            ConstValue::I64(a) => 
-                format!("li t0, {}", a) + 
-                &format!("sd t0, {}", self.offset.gen_asm()),
-            ConstValue::U32(a) => 
-                format!("li t0, {}", a) + 
-                &format!("sw t0, {}", self.offset.gen_asm()),
-            ConstValue::U64(a) => 
-                format!("li t0, {}", a) + 
-                &format!("sd t0, {}", self.offset.gen_asm()),
+    pub fn get_base_and_offset(&self) -> (PhysReg, i32) {
+        match self {
+            BasePointer::Sp(offset) => (PhysReg::Sp, *offset),
+            BasePointer::Fp(offset) => (PhysReg::Fp, *offset),
         }
     }
 }
 
+// TODO
+use crate::codegen::rv64::{PhysReg, PhysStack};
+use crate::codegen::rv64_asm::*; 
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Location {
     Register(PhysReg),
     Stack(PhysStack), // frame offset
-                            // fp base
+                      // fp base
+}
+
+impl Location {
+    pub fn gen_load_asm(&self, other: &Location) -> Result<Asm, GenAsmErr> {
+        match self {
+            Location::Stack(phys_stack) => phys_stack.gen_load_asm(other),
+            Location::Register(phys_reg) => phys_reg.gen_load_asm(other)
+        }
+    }
 }
 
 pub struct VRegData {
@@ -191,19 +93,18 @@ pub enum GenAsmErr {
 }
 
 impl VRegData {
-    /// ```
-    /// self = other;
-    /// ```
-    fn get_assign_asm(&self, other: &VRegData) -> Result<String, GenAsmErr> {
-        match (
-            if let Some(a) = &self.location {a} else {return Err(GenAsmErr::VregNotLocated);},
-            if let Some(a) = &other.location {a} else {return Err(GenAsmErr::VregNotLocated);}
-        ) {
-            (Location::Register(self_reg), location) => self_reg.gen_load_asm(location),
-            (Location::Stack(self_stack), location) => self_stack.gen_load_asm(location),
-        }
-    }
-
+    // /// ```
+    // /// self = other;
+    // /// ```
+    // fn gen_load_asm(&self, other: &VRegData) -> Result<String, GenAsmErr> {
+    //     match (
+    //         if let Some(a) = &self.location {a} else {return Err(GenAsmErr::VregNotLocated);},
+    //         if let Some(a) = &other.location {a} else {return Err(GenAsmErr::VregNotLocated);}
+    //     ) {
+    //         (Location::Register(self_reg), location) => self_reg.gen_load_asm(location),
+    //         (Location::Stack(self_stack), location) => self_stack.gen_load_asm(location),
+    //     }
+    // }
 }
 
 pub struct VregArena {
@@ -225,10 +126,6 @@ impl VregArena {
         };
         self.regs.push(reg);
         v_reg
-    }
-
-    pub fn assign_locations(&mut self) -> Byte {
-        todo!()
     }
 
     pub fn get_vregdata(&self, vreg: &VReg) -> Option<&VRegData> {
@@ -313,6 +210,7 @@ pub struct RvIR (pub Vec<Instruction>);
 pub struct FuncDef {
     pub name: String, // name of function
     func_id: FuncId,
+    pub args: Vec<VReg>,
     pub arg_size: Byte,
     pub local_size: Byte, // local value size
 
@@ -321,12 +219,19 @@ pub struct FuncDef {
 }
 
 impl FuncDef {
-    fn new (name: &str, arg_size: Byte /*byte*/, local_size: Byte /*byte*/, func_id: FuncId) -> Self {
+    fn new (
+        name: &str,
+        arg_size: Byte /*byte*/, 
+        local_size: Byte /*byte*/,
+        func_id: FuncId,
+        args: Vec<VReg>
+) -> Self {
         Self {
             name: name.to_string(),
             arg_size,
             local_size,
             func_id,
+            args,
             vreg_arena: VregArena { regs: vec![] },
             ir: RvIR(vec![])
         }
@@ -334,6 +239,10 @@ impl FuncDef {
 
     pub fn set_ir(&mut self, rv_ir: RvIR) {
         self.ir = rv_ir;
+    }
+
+    pub fn set_args(&mut self, args: Vec<VReg>) {
+        self.args = args;
     }
 }
 
@@ -346,7 +255,14 @@ pub struct ModuleContext {
 
     pub fn create_func(&mut self, name: &str, args: Byte, local_stack_size: Byte) -> FuncId {
         let func_id = FuncId(self.funcs.len());
-        self.funcs.push(FuncDef::new(name, args, local_stack_size, func_id));
+        self.funcs.push(
+            FuncDef::new(
+                name,
+                args,
+                local_stack_size,
+                func_id,
+                vec![] // TODO
+            ));
         func_id
     }
 
@@ -368,3 +284,4 @@ mod ir_ir_test {
     // 
     // }
 }
+
