@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::unit::size::Byte;
 
 // vertual register
@@ -44,13 +46,6 @@ pub enum BasePointer {
 }
 
 impl BasePointer {
-    fn gen_asm(&self) -> String {
-        match self {
-            BasePointer::Sp(offset) => format!("{}(sp)", offset),
-            BasePointer::Fp(offset) => format!("{}(fp)", offset),
-        }
-    }
-
     pub fn get_base_and_offset(&self) -> (PhysReg, i32) {
         match self {
             BasePointer::Sp(offset) => (PhysReg::Sp, *offset),
@@ -87,24 +82,11 @@ pub struct VRegData {
                                    // in the future, I try to optimize this alloc by using register
 }
 
+#[derive(Debug)]
 pub enum GenAsmErr {
     VregNotLocated,
     UnsupportedByteAlignment,
-}
-
-impl VRegData {
-    // /// ```
-    // /// self = other;
-    // /// ```
-    // fn gen_load_asm(&self, other: &VRegData) -> Result<String, GenAsmErr> {
-    //     match (
-    //         if let Some(a) = &self.location {a} else {return Err(GenAsmErr::VregNotLocated);},
-    //         if let Some(a) = &other.location {a} else {return Err(GenAsmErr::VregNotLocated);}
-    //     ) {
-    //         (Location::Register(self_reg), location) => self_reg.gen_load_asm(location),
-    //         (Location::Stack(self_stack), location) => self_stack.gen_load_asm(location),
-    //     }
-    // }
+    NotImplimentedYet,
 }
 
 pub struct VregArena {
@@ -112,9 +94,6 @@ pub struct VregArena {
 }
 
 impl VregArena {
-    fn new() -> Self {
-        Self { regs: Vec::new() }
-    }
 
     pub fn alloc(&mut self, size: Byte, name: Option<String>) -> VReg {
         let v_reg = VReg(self.regs.len());
@@ -219,19 +198,19 @@ pub struct FuncDef {
 }
 
 impl FuncDef {
-    fn new (
+    pub fn new (
         name: &str,
         arg_size: Byte /*byte*/, 
         local_size: Byte /*byte*/,
-        func_id: FuncId,
-        args: Vec<VReg>
+        // func_id: FuncId,
+        // args: Vec<VReg>
 ) -> Self {
         Self {
             name: name.to_string(),
             arg_size,
             local_size,
-            func_id,
-            args,
+            func_id: FuncId(0),
+            args: vec![],
             vreg_arena: VregArena { regs: vec![] },
             ir: RvIR(vec![])
         }
@@ -246,23 +225,44 @@ impl FuncDef {
     }
 }
 
+
+pub struct Symbols (
+    pub HashMap<FuncId, String>
+);
+
 // Set of functions
 pub struct ModuleContext {
-    funcs: Vec<FuncDef>
+    pub symbols: Symbols,
+    pub funcs: Vec<FuncDef>
 } impl ModuleContext { 
 
-    pub fn new() -> Self { Self { funcs: vec![] } }
+    pub fn new() -> Self { Self { symbols: Symbols(HashMap::new()), funcs: vec![] } }
 
-    pub fn create_func(&mut self, name: &str, args: Byte, local_stack_size: Byte) -> FuncId {
+    pub fn create_func(&mut self, name: &str, arg_size: Byte, local_size: Byte) -> FuncId {
         let func_id = FuncId(self.funcs.len());
+        
+        // 1. シンボルテーブルに名前を「先」に登録する
+        self.symbols.0.insert(func_id, name.to_string());
+        
+        // 2. IRが空っぽの（未完成な）FuncDefをリストに追加する
+        let empty_func = FuncDef::new(
+            name, 
+            arg_size, 
+            local_size, 
+        );
+        self.funcs.push(empty_func);
+
+        // 3. 確定したIDを返す
+        func_id
+    }
+
+    pub fn add_func(&mut self, mut func_def: FuncDef) -> FuncId {
+        let func_id = FuncId(self.funcs.len());
+        func_def.func_id = func_id;
+        self.symbols.0.insert(func_id, func_def.name.clone());
         self.funcs.push(
-            FuncDef::new(
-                name,
-                args,
-                local_stack_size,
-                func_id,
-                vec![] // TODO
-            ));
+            func_def
+        );
         func_id
     }
 

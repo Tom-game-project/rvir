@@ -1,14 +1,12 @@
-pub mod unit;
-pub mod ir;
-pub mod codegen;
 
-use crate::ir::ir::*;
-use crate::unit::size::Byte;
+use rvir::ir::ir::*;
+use rvir::unit::size::Byte;
 
 fn main() {
     println!("Hello, world!");
 }
 
+/*
 #[cfg(test)]
 mod test {
     use crate::*;
@@ -37,3 +35,4 @@ mod test {
         // println!("{}", asm);
     }
 }
+*/
