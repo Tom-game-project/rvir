@@ -1,10 +1,7 @@
-use std::vec;
-
 use crate::ir::ir::*;
 use crate::unit::size::*;
 
 use crate::codegen::rv64_asm::*;
-
 
 pub struct NaiveAllocator;
 
@@ -55,7 +52,6 @@ impl PhysReg {
         }
     }
 
-    /// 
     pub fn gen_load_asm(&self, location: &Location) -> Result<Asm, GenAsmErr> {
         match location {
             Location::Register(reg) => {
@@ -208,23 +204,34 @@ impl RegisterAllocator for NaiveAllocator {
             args: &[VReg],
         ) -> Byte {
             let mut current_offset = - 0x10 /* return addr and frame pointer */;
+            let mut spillout_offset = 0;
 
             // arguments
             for (i, &arg_vreg) in args.iter().enumerate() {
+                let arg_data = arena.regs.get_mut(arg_vreg.0).unwrap();
+
+                // 引数をスタックメモリに移す
                 if i < 8 {
-                    let arg_data = arena.regs.get_mut(arg_vreg.0).unwrap();
-                    current_offset -= arg_data.size.value as i32;
+                    current_offset -= 8 /* byte */; // 引数のサイズによらず固定
                     arg_data.location = Some(
                         Location::Stack(
                             PhysStack::new(
-                                    BasePointer::Fp(current_offset), 
-                                    arg_data.size.clone()
-                                )
+                                BasePointer::Fp(current_offset), 
+                                arg_data.size.clone()
                             )
                         )
+                    );
                 } else {
                     // spill out arguments
-                    todo!() // TODO まだスイルアウト分は実装していない
+                    arg_data.location = Some(
+                        Location::Stack(
+                            PhysStack::new(
+                                BasePointer::Fp(spillout_offset), 
+                                arg_data.size.clone()
+                            )
+                        )
+                    );
+                    spillout_offset += 8 /* byte */;
                 }
             }
 
@@ -270,10 +277,10 @@ pub fn gen_funcdef(
 
     asm_statements.push(AsmStatement::Label(func_def.name.clone()));
 
-    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size  as i32 * -1 }),);
-    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Fp, base: PhysReg::Sp, offset: (aligned_stack_size - 0x10) as i32 }));
-    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Fp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);
-    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }));
+    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size  as i32 * -1 }),);        // スタックを伸ばす
+    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Fp, base: PhysReg::Sp, offset: (aligned_stack_size - 0x10) as i32 })); // 古いfpをスタックに保存する
+    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Fp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);              // fpを更新する
+    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }));                               // retunr addrをスタックに記録する
 
     asm_statements.push(
         AsmStatement::Comment("--- save asm register ---".to_string())
@@ -304,10 +311,15 @@ pub fn gen_funcdef(
 
     }
 
+    asm_statements.push(
+        AsmStatement::Comment("--- impl ---".to_string())
+    );
+
     let instructions = &func_def.ir.0;
     for instruction in instructions {
 
         match instruction {
+
             Instruction::Call { dest, func, args } => {
                 let func_call_asm = gen_funccall(
                     dest, func, args, func_def, &module_context
@@ -319,20 +331,47 @@ pub fn gen_funcdef(
                 let a = gen_binop(op, dest, lhs, rhs, func_def)?.statements;
                 asm_statements = [asm_statements, a].concat()
             }
-            Instruction::Ret { val } => {
-                // TODO
-            }
-            _ => {
 
+            Instruction::Ret { val } => {
+                asm_statements.push(
+                    AsmStatement::Comment("--- return ---".to_string())
+                );
+                if let Some(a) = val {
+                    match a {
+                        Operand::Const(c) => {
+                            let asm = PhysReg::A0.gen_load_immediate(c)
+                                .statements;
+                            
+                            asm_statements = [asm_statements, asm].concat()
+                        }
+                        Operand::Reg(vreg) => {
+                            let location = func_def
+                                .vreg_arena
+                                .get_vregdata(vreg)
+                                .unwrap()
+                                .location
+                                .unwrap();
+                            let asm = PhysReg::A0.gen_load_asm(&location)
+                                .unwrap() 
+                                .statements;
+                            
+                            asm_statements = [asm_statements, asm].concat()
+                        }
+                    }
+                }
+
+                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }),);                 // メモリからreturn addrを取り出してraにセット
+                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Fp, base: PhysReg::Fp, offset: -0x10 }));                 // fpを戻す メモリから復元するため、fpは気にしなくても良さそう
+                asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);// スタックを戻す
+                asm_statements.push(AsmStatement::Instruction(RvInst::Ret)); // as same as `jalr zero, 0(ra)`
+            }
+
+            // TODO 未実装のInstruction
+            _ => {
             }
         }
     }
 
-    asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }),);
-    asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Fp, base: PhysReg::Fp, offset: -0x10 }));
-    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);
-    asm_statements.push(AsmStatement::Instruction(RvInst::Ret  )); // as same as `jalr zero, 0(ra)`
-    
     Ok(Asm { statements: asm_statements })
 }
 
@@ -343,13 +382,22 @@ pub fn gen_funccall (
 ) -> Result<Asm, GenAsmErr> {
     let mut asm_statements:Vec<AsmStatement> = Vec::new();
 
+
+    // スピルアウトサイズを計算16byteアラインメントに合わせる
+    let spillout_size = if 8 < args.len() {
+        let size = args.len() - 8 /* args */;
+        aligned0x10(size as u64 * 8) /* byte */ // 引数のサイズが4byteだったとしても、64bit空間内に配置する
+    } else {
+        0
+    };
+
     // 引数のセット
     // counts of args you want to store on the stack
     for (i, operand) in args.iter().enumerate() {
         asm_statements = [asm_statements, match operand {
+            // 引数
             Operand::Const(const_val) => {
                 // all args stored under the fp
-
                 match i {
                     0 => PhysReg::A0.gen_load_immediate(const_val),
                     1 => PhysReg::A1.gen_load_immediate(const_val),
@@ -360,7 +408,7 @@ pub fn gen_funccall (
                     6 => PhysReg::A6.gen_load_immediate(const_val),
                     7 => PhysReg::A7.gen_load_immediate(const_val),
                     8.. => 
-                        PhysStack::new(BasePointer::Sp(8 /* byte */ * i as i32), const_val.get_size())
+                        PhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), const_val.get_size())
                             .gen_load_immediate(const_val)
                 }
             }
@@ -379,9 +427,9 @@ pub fn gen_funccall (
                         6 => PhysReg::A6.gen_load_asm(location),
                         7 => PhysReg::A7.gen_load_asm(location),
                         8.. => 
-                            PhysStack::new(BasePointer::Sp(8 /* byte */ * i as i32), vreg_data.size)
+                            PhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), vreg_data.size)
                                 .gen_load_asm(location)
-                        
+
                     }?
                 } else {
                     return Err(GenAsmErr::VregNotLocated);
@@ -391,34 +439,46 @@ pub fn gen_funccall (
         
     }
 
+    asm_statements.push(
+        AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: -1 * spillout_size as i32 })
+    );
+
     // 関数の呼び出し
     asm_statements.push(
-        AsmStatement::Instruction(RvInst::Call { symbol: 
+        AsmStatement::Instruction(
+            RvInst::Call { symbol: 
             module_context
                 .0
                 .get(&func.0)
                 .expect("name is not set")
                 .clone()
-                 // .get_func(func.0)
-                 // .expect("name is not set")
-                 // .name
-                 // .clone()
         })
+    );
+
+    // spを元の状態に戻す
+    asm_statements.push(
+        AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: spillout_size as i32 })
     );
 
     // asm_statements
     // return value is in the `a0` register
 
-    if let Some (vreg) = dest {
-        if let Some(vreg_data) = func_def.vreg_arena.get_vregdata(vreg) {
-            
-        } else {
-            // ERROR
-        }
-        // asm.push_str(format!("addi a0, {}, 0", ));
-    } else {
-        // ERROR
-    }
+    // 呼び出しから
+    // 返った後の処理
+    if let Some (vreg) = dest { // distは無くてもOk
+        let vreg_data = func_def.vreg_arena.get_vregdata(vreg).unwrap();
+
+        asm_statements = [
+            asm_statements, 
+            vreg_data
+                .location
+                .unwrap()
+                .gen_load_asm(&Location::Register(PhysReg::A0))
+                .unwrap()
+                .statements 
+        ]
+        .concat();
+    } 
 
     Ok(Asm{ statements: asm_statements })
 }
@@ -489,14 +549,24 @@ pub fn gen_binop (
     Ok(Asm { statements })
 }
 
+// ================================================================================
+//                                       test
+// ================================================================================
 
 #[cfg(test)]
 mod rv64_codegen_test {
+    use std::fmt::format;
+    use std::fs;
+
     use crate::codegen::rv64::gen_funcdef;
-    use crate::ir::ir::{FuncDef, Instruction, ModuleContext, Operand, Operator, RvIR};
+    use crate::ir::ir::{Dest, Func, FuncDef, Instruction, ModuleContext, Operand, Operator, RvIR};
     use crate::codegen::rv64::NaiveAllocator;
     use crate::unit::size::Byte;
-
+    use crate::codegen::rv64_asm::{
+        Asm,
+        AsmStatement::Directive,
+        Directive::Global
+    };
 
     #[test]
     fn test00 () {
@@ -535,14 +605,10 @@ mod rv64_codegen_test {
         );
         let id = mod_ctx.add_func(func);
 
-        // let asm = codegen(&mod_ctx);
-        // println!("{}", asm);
     }
 
     #[test]
     fn test01 () {
-        // 
-
         let mut mod_ctx = ModuleContext::new();
 
         let func_id = mod_ctx.create_func(
@@ -574,21 +640,151 @@ mod rv64_codegen_test {
             ]));
         }
 
+        let mut asm_statements = Vec::new();
+
+        asm_statements.push(Directive(Global("test_func".to_string())));
         for i in mod_ctx.funcs.iter_mut() {
-            match gen_funcdef(
-                i,
-                &mod_ctx.symbols,
-                &mut NaiveAllocator
-            ) {
-                Ok(asm) => {
-                    println!("asm generated!");
-                    println!("{}", asm);
+            asm_statements = [
+                asm_statements,
+                match gen_funcdef(
+                    i,
+                    &mod_ctx.symbols,
+                    &mut NaiveAllocator
+                ) {
+                    Ok(asm) => {
+                        asm.statements
+                    }
+                    Err(e) => {
+                        println!("error occured!");
+                        println!("{:?}", e);
+                        return ;
+                    }
                 }
-                Err(e) => {
-                    println!("error occured!");
-                    println!("{:?}", e);
-                }
-            }
+            ].concat();
         }
+
+        let asm = Asm {
+            statements: asm_statements
+        };
+
+        std::fs::write("test_program.S", &format!("{}", asm)).unwrap();
+    }
+
+    #[test]
+    fn test02 () {
+        let mut mod_ctx = ModuleContext::new();
+
+        let func_id1 = mod_ctx.create_func(
+            "arg10",
+            Byte::new(16),
+            Byte::new(16));
+
+        let func_id2 = mod_ctx.create_func(
+            "test_func",
+            Byte::new(80),
+            Byte::new(8));
+
+        // 渡されたすべての引数を足す
+        {
+            let func = mod_ctx.get_func_mut(func_id1).unwrap();
+
+            let mut args = Vec::new();
+
+            let arg1_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg1")));
+            let arg2_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg2")));
+            let arg3_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg3")));
+            let arg4_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg4")));
+            let arg5_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg5")));
+            let arg6_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg6")));
+            let arg7_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg7")));
+            let arg8_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg8")));
+            let arg9_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg9")));
+            let arg10_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("arg10")));
+            args.push(arg1_reg);
+            args.push(arg2_reg);
+            args.push(arg3_reg);
+            args.push(arg4_reg);
+            args.push(arg5_reg);
+            args.push(arg6_reg);
+            args.push(arg7_reg);
+            args.push(arg8_reg);
+            args.push(arg9_reg);
+            args.push(arg10_reg);
+
+            let tmp_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("tmp")));
+
+            func.set_args(args);
+            func.set_ir(RvIR(vec![
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Const(crate::ir::ir::ConstValue::I64(0)), rhs: Operand::Reg(arg1_reg)},
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg2_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg3_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg4_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg5_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg6_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg7_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg8_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg9_reg), },
+                Instruction::BinOp { op: Operator::Add , dest: tmp_reg, lhs: Operand::Reg(tmp_reg), rhs: Operand::Reg(arg10_reg), },
+
+                Instruction::Ret { val: Some(Operand::Reg(tmp_reg)) }
+            ]));
+        }
+
+        {
+            let func = mod_ctx.get_func_mut(func_id2).unwrap();
+
+            let args = Vec::new();
+
+            let tmp_reg = func.vreg_arena.alloc(Byte::new(8), Some(String::from("tmp")));
+
+            func.set_args(args);
+            func.set_ir(RvIR(vec![
+                Instruction::Call { dest: Some(tmp_reg), func: Func(func_id1), args: vec![
+                    Operand::Const(crate::ir::ir::ConstValue::I64(1)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(2)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(3)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(4)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(5)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(6)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(7)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(8)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(9)),
+                    Operand::Const(crate::ir::ir::ConstValue::I64(10)),
+                ] },
+                Instruction::Ret { val: Some(Operand::Reg(tmp_reg)) }
+            ]));
+        }
+
+        let mut asm_statements = Vec::new();
+
+        asm_statements.push(Directive(Global("test_func".to_string())));
+
+        for i in mod_ctx.funcs.iter_mut() {
+
+            asm_statements = [
+                asm_statements,
+                match gen_funcdef(
+                    i,
+                    &mod_ctx.symbols,
+                    &mut NaiveAllocator
+                ) {
+                    Ok(asm) => {
+                        asm.statements
+                    }
+                    Err(e) => {
+                        println!("error occured!");
+                        println!("{:?}", e);
+                        return ;
+                    }
+                }
+            ].concat();
+        }
+
+        let asm = Asm {
+            statements: asm_statements
+        };
+
+        std::fs::write("test_program.S", &format!("{}", asm)).unwrap();
+        println!("DONE!");
     }
 }
