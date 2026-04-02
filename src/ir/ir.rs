@@ -83,6 +83,16 @@ pub struct VRegData {
 }
 
 #[derive(Debug)]
+pub struct VRegInfo {
+    pub v_reg: VReg,
+    pub crossed_call: bool, // 生存期間中に関数のcallがある
+    pub life_span: LifeSpan // 生存期間
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LifeSpan(pub usize, pub usize);
+
+#[derive(Debug)]
 pub enum GenAsmErr {
     VregNotLocated,
     UnsupportedByteAlignment,
@@ -141,6 +151,21 @@ pub enum Operand {
 
 pub type Dest = VReg;
 
+/// 基本ブロックの定義
+///
+/// 1) 次の文を基本ブロックの先頭とする
+///
+///   a. そのプログラムの先頭の文
+///   b. 飛越し文の行先の先頭 (条件付き含む)
+/// 2) 次までを基本ブロックとする
+///   次の 1)のような文の直前まで
+///   1.aは何かの次の行にはなり得ないので、簡単に言えば、飛越し文まで
+///   
+pub struct BasicBlock {
+    pub label: Label,               // ブロックの入り口（ここにラベルを持つ）
+    pub insts: Vec<Instruction>,    // 中身の命令列（ここにはLabelDefは絶対入らない）
+}
+
 #[derive(Debug, Clone)]
 pub enum Instruction {
     BinOp {
@@ -176,7 +201,7 @@ pub enum Instruction {
     },
 
     Branch {
-        cond: Operand,
+        cond: Operand,      // Operandが0のときfalse label
         true_label: Label,
         false_label: Label,
     }

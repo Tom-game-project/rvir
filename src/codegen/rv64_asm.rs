@@ -47,6 +47,8 @@ pub enum RvInst {
     /// jal rd, label
     /// rd に戻り先アドレス(PC+4)を保存し、label の位置へジャンプする
     Jal { rd: PhysReg, label: String },
+    J { label: String },  // jal zero, label
+    Bnez { rs1: PhysReg, label: String },
     
     // --- S-Type (ストア) ---
     /// レジスタの内容をメモリに書き込む
@@ -63,7 +65,7 @@ pub enum RvInst {
     Ret,
 }
 
-use std::fmt;
+use std::fmt::{self, write};
 // use crate::codegen::rv64::PhysReg; // (PhysRegのインポートが必要です)
 
 // ==========================================
@@ -127,6 +129,8 @@ impl fmt::Display for RvInst {
             RvInst::Lw { rd, base, offset } => write!(f, "lw {}, {}({})", rd.get_reg_name(), offset, base.get_reg_name()),
             RvInst::Jalr { rd, base, offset } => write!(f, "jalr {}, {}({})", rd.get_reg_name(), offset, base.get_reg_name()),
             RvInst::Jal { rd, label } => write!(f, "jal {}, {}", rd.get_reg_name(), label),
+            RvInst::J { label } => write!(f, "j {}", label),
+            RvInst::Bnez { rs1, label } => write!(f, "bnez {}, {}", rs1.get_reg_name(), label),
 
             // --- S-Type ---
             RvInst::Sd { rs2, base, offset } => write!(f, "sd {}, {}({})", rs2.get_reg_name(), offset, base.get_reg_name()),
