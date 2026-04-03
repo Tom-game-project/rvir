@@ -521,7 +521,7 @@ mod ir_ir_test {
                 Instruction::BinOp { op: Operator::Neq, dest: tmp_reg_c, lhs: Operand::Reg(tmp_reg_j), rhs: Operand::Const(ConstValue::I64(0)) },
                 Instruction::Branch {
                     cond: Operand::Reg(tmp_reg_c), 
-                    true_label: Label("block2".to_string()), 
+                    true_label: Label("block1".to_string()), 
                     false_label: Label("block3".to_string()) 
                 }
             ]);
