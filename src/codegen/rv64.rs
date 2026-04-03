@@ -583,146 +583,14 @@ pub fn gen_binop (
 // レジスタの生存期間判定
 // ============================================================================
 
-
-
-/// 
-pub fn optimize_test_function (basic_block: &BasicBlock) -> Vec<VRegInfo> {
-    let mut check_list = Vec::new();
-    let mut vec_vreg_info = Vec::new();
-
-    for (step, inst) in basic_block.insts.iter().enumerate() {
-        match inst {
-            Instruction::Assign { dest, src:_src } => {                
-                if !check_list.contains(&dest) {
-                    check_list.push(dest);
-                    let life_span = LifeSpan(step, check_life_end(*dest, basic_block));
-                    let vreg_info = VRegInfo {
-                        v_reg: *dest,
-                        crossed_call: check_func_called_in_lifesapn(life_span, basic_block),
-                        life_span
-                    };
-                    vec_vreg_info.push(vreg_info);
-                }
-            }
-            Instruction::Call { dest, func:_func, args:_args } => {
-                if let Some(vreg) = dest {
-                    if !check_list.contains(&vreg) {
-                        check_list.push(vreg);
-                        let life_span = LifeSpan(step, check_life_end(*vreg, basic_block));
-                        let vreg_info = VRegInfo {
-                            v_reg: *vreg,
-                            crossed_call: check_func_called_in_lifesapn(life_span, basic_block),
-                            life_span
-                        };
-                        vec_vreg_info.push(vreg_info);
-                    }
-                } 
-            }
-            Instruction::BinOp { op:_op, dest, lhs:_lhs, rhs:_rhs } => {
-                if !check_list.contains(&dest) {
-                    check_list.push(dest);
-                    let life_span = LifeSpan(step, check_life_end(*dest, basic_block));
-                    let vreg_info = VRegInfo {
-                        v_reg: *dest,
-                        crossed_call: check_func_called_in_lifesapn(life_span, basic_block),
-                        life_span
-                    };
-                    vec_vreg_info.push(vreg_info);
-                }
-            }
-            _ => {
-
-            }
-        }
-    }
-    vec_vreg_info
-}
-
-fn check_life_end (target_vreg: VReg, basic_block: &BasicBlock) -> usize {
-    for (i, inst) in basic_block.insts.iter().rev().enumerate() {
-        match inst {
-            Instruction::Assign { dest: _, src } => {                
-                if let Operand::Reg(vreg) = src {
-                    if *vreg == target_vreg {
-                        return basic_block.insts.len() - i;
-                    }
-                }
-            }
-            Instruction::Call { dest:_, func:_, args } => {
-                for arg in args {
-                    if let Operand::Reg(vreg) = arg {
-                        if *vreg == target_vreg {
-                            return basic_block.insts.len() - i;
-                        }
-                    }
-                }
-            }
-            Instruction::BinOp { op:_, dest:_, lhs, rhs } => {
-                if let Operand::Reg(vreg) = lhs {
-                    if *vreg == target_vreg {
-                        return basic_block.insts.len() - i;
-                    }
-                }
-                if let Operand::Reg(vreg) = rhs {
-                    if *vreg == target_vreg {
-                        return basic_block.insts.len() - i;
-                    }
-                }
-            }
-            _ => {
-                // skip
-            }
-        }
-    }
-    return 0;
-}
-
-fn check_func_called_in_lifesapn(life_span: LifeSpan, basic_block: &BasicBlock) -> bool {
-    if life_span.0 < life_span.1 { // 普通の場合
-        basic_block.insts[life_span.0..life_span.1]
-            .iter()
-            .any(
-                |inst| 
-                if let Instruction::Call { dest: _dest, func: _func, args:_args } = inst {
-                    true
-                } else {
-                    false
-                }) 
-    } else { 
-        // 循環している場合
-        // 0..LifeSpan.1 LifeSpan.0..=
-        basic_block.insts[0..life_span.1]
-            .iter()
-            .any(
-                |inst| 
-                if let Instruction::Call { dest: _dest, func: _func, args:_args } = inst {
-                    true
-                } else {
-                    false
-                }) ||
-        basic_block.insts[life_span.0..]
-            .iter()
-            .any(
-                |inst| 
-                if let Instruction::Call { dest: _dest, func: _func, args:_args } = inst {
-                    true
-                } else {
-                    false
-                }) 
-    }
-}
-
 // ================================================================================
 //                                       test
 // ================================================================================
 
 #[cfg(test)]
 mod rv64_codegen_test {
-    use std::fmt::format;
-    use std::{fs, vec};
-
-    use crate::codegen::rv64::{gen_funcdef, optimize_test_function};
-    use crate::ir::ir::{BasicBlock, ConstValue, Dest, Func, FuncDef, Instruction, Label, ModuleContext, Operand, Operator, RvIR};
+    use crate::codegen::rv64::gen_funcdef;
+    use crate::ir::ir::{BasicBlockList, ConstValue, Func, FuncDef, Instruction, Label, ModuleContext, Operand, Operator, RvIR};
     use crate::codegen::rv64::NaiveAllocator;
     use crate::unit::size::Byte;
     use crate::codegen::rv64_asm::{
@@ -974,30 +842,34 @@ mod rv64_codegen_test {
 
             func.set_args(args);
 
-            let basic_block_if_cond = BasicBlock {
-                label: Label("hello".to_string()),
-                insts: vec![
+            let mut basic_block_list = BasicBlockList::new();
+
+            let basic_block_if_cond = basic_block_list.alloc(Label("hello".to_string()));
+
+            basic_block_list.set_inst(basic_block_if_cond, 
+                vec![
                     Instruction::Branch {
                         cond: Operand::Reg(tmp_reg),
                         true_label: Label("true_label".to_string()),
                         false_label: Label("false_label".to_string()),
-                    },
+                        },
+                    Instruction::Ret { val: Some(Operand::Reg(tmp_reg)) }
                 ]
-            };
+            );
 
-            let basic_block_true_label = BasicBlock {
-                label: Label("true_label".to_string()),
-                insts: vec![
+            let basic_block_true_label = basic_block_list.alloc(Label("true_label".to_string()));
+
+            basic_block_list.set_inst(basic_block_true_label, 
+                vec![
                     Instruction::Ret { val: Some(Operand::Const(ConstValue::I64(0xdeadbeaf))) }
-                ]
-            };
+            ]);
 
-            let basic_block_false_label = BasicBlock {
-                label: Label("false_label".to_string()),
-                insts: vec![
+            let basic_block_false_label = basic_block_list.alloc(Label("false_label".to_string()));
+
+            basic_block_list.set_inst(basic_block_false_label,
+                vec![
                     Instruction::Ret { val: Some(Operand::Const(ConstValue::I64(0xBADC0DE))) }
-                ]
-            };
+            ]);
 
             func.set_ir(RvIR(vec![
                 Instruction::Branch {
@@ -1057,23 +929,23 @@ mod rv64_codegen_test {
             let tmp_reg_d = func.vreg_arena.alloc(Byte::new(8), Some(String::from("tmp_d")));
             let tmp_reg_e = func.vreg_arena.alloc(Byte::new(8), Some(String::from("tmp_e")));
 
-            // basic block
-            let basic_block = BasicBlock{
-                label: Label("inloop".to_string()),
-                insts: vec![ 
+            let mut basic_block_list = BasicBlockList::new();
+
+            let in_loop_id = basic_block_list.alloc(Label("inloop".to_string()));
+
+            basic_block_list.set_inst(in_loop_id, 
+                vec![ 
                     Instruction::BinOp { op: Operator::Add, dest: tmp_reg_a, lhs: Operand::Reg(tmp_reg_d), rhs: Operand::Const(ConstValue::U64(2)) },
                     Instruction::BinOp { op: Operator::Add, dest: tmp_reg_b, lhs: Operand::Reg(tmp_reg_a), rhs: Operand::Reg(tmp_reg_e) },
                     Instruction::BinOp { op: Operator::Add, dest: tmp_reg_c, lhs: Operand::Reg(tmp_reg_a), rhs: Operand::Const(ConstValue::U64(3)) },
                     Instruction::BinOp { op: Operator::Add, dest: tmp_reg_d, lhs: Operand::Reg(tmp_reg_b), rhs: Operand::Reg(tmp_reg_c) },
                     Instruction::BinOp { op: Operator::Add, dest: tmp_reg_e, lhs: Operand::Reg(tmp_reg_d), rhs: Operand::Const(ConstValue::U64(5)) },
                 ]
-            };
+            );
 
-            let basic_block_infomations = optimize_test_function(&basic_block);
-
-            for i in basic_block_infomations {
-                println!("{:?}", i);
-            }
+            // for i in basic_block_infomations {
+            //     println!("{:?}", i);
+            // }
         }
     }
 }

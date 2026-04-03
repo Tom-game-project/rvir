@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use crate::unit::size::Byte;
 
@@ -37,7 +38,6 @@ impl ConstValue {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BasePointer {
@@ -151,6 +151,154 @@ pub enum Operand {
 
 pub type Dest = VReg;
 
+use std::collections::HashSet;
+
+pub struct Setting;
+/// IRの設定が終了
+pub struct IRSetted;
+pub struct AllSetted;
+
+pub struct BasicBlockList<State> {
+    pub list: Vec<BasicBlock>,
+    _phantom: PhantomData<State>
+}
+
+impl BasicBlockList<Setting> {
+    pub fn new() -> Self {
+        Self { list: Vec::new(), _phantom: PhantomData }
+    }
+
+    pub fn alloc(&mut self, label: Label) -> BasicBlockId {
+        let index = BasicBlockId(self.list.len());
+        self.list.push(
+            BasicBlock { 
+                label,
+                id: index, 
+                pred: Vec::new(), 
+                succ: Vec::new(), 
+                insts: Vec::new(), 
+                reach: HashSet::new() 
+            }
+        );
+        index
+    }
+
+    pub fn set_inst(&mut self, id: BasicBlockId, insts: Vec<Instruction>) {
+        self.list[id.0].insts = insts;
+    }
+
+    /// irの設定が終了したら、状態を移す
+    pub fn finish_ir_setting (self) -> BasicBlockList<IRSetted> {
+        BasicBlockList { list: self.list, _phantom: PhantomData }
+    }
+}
+
+pub enum BasicBlockListError {
+    UndefinedLabel(Label)
+}
+
+fn labelmap2idmap(label_map: HashMap<&Label, Vec<&Label>>, basic_block_list: &BasicBlockList<IRSetted>) -> Result<HashMap<BasicBlockId, Vec<BasicBlockId>>, BasicBlockListError> {
+    Ok(label_map
+        .iter()
+        .map(|(&k, v)| {
+            let new_k = basic_block_list
+                .get_basic_block_by_label(&k)
+                .ok_or_else(|| BasicBlockListError::UndefinedLabel(k.clone())
+            )?;
+            let new_v= v.iter().map(|&c| {
+                basic_block_list
+                    .get_basic_block_by_label(c)
+                    .ok_or_else(|| BasicBlockListError::UndefinedLabel(c.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .map(|a| a.id)
+            .collect::<Vec<BasicBlockId>>();
+            Ok((new_k.id, new_v))
+        })
+        .collect::<Result<Vec<(BasicBlockId, Vec<BasicBlockId>)>, BasicBlockListError>>()?
+        .into_iter()
+        .fold(
+            HashMap::<BasicBlockId, Vec<BasicBlockId>, _>::new(),
+            |mut acc:HashMap<BasicBlockId, Vec<BasicBlockId>>, (k, v)| {
+                acc.insert(k, v);
+                acc
+            }
+        ))
+}
+
+/// IRの設定が終わったときに存在するメソッド
+impl BasicBlockList<IRSetted> {
+
+    pub fn get_basic_block(&self, id: BasicBlockId) -> &BasicBlock {
+        &self.list[id.0]
+    }
+
+    pub fn get_basic_block_by_label(&self, label: &Label) -> Option<&BasicBlock>{
+        self.list.iter().find(|b | b.label == *label)
+    }
+
+    /// TODO: グラフを作る
+    /// できればBasicBlockListの状態を変えてirを再設定できないようにする
+    ///
+    /// ir設定後　呼び出されることを想定する
+    pub fn set_pred_and_succ(mut self) -> Result<BasicBlockList<AllSetted>, BasicBlockListError> {
+        let mut pred_dict : HashMap<&Label, Vec<&Label>> = HashMap::new();
+        let mut succ_dict : HashMap<&Label, Vec<&Label>> = HashMap::new();
+
+        for i in &self.list {
+            pred_dict.insert(&i.label, Vec::new());
+            succ_dict.insert(&i.label, Vec::new());
+        }
+
+        for i in &self.list { // ブロックそれぞれについて
+            let succ = i.extract_successor_labels();
+
+            succ_dict.insert(&i.label, succ.clone());
+            for j in succ { // それぞれのsuccとなっているラベルを主体としてみたとき
+                if let Some(pred) = pred_dict.get_mut(j /* この後続(succ)のラベルにとってiは先行するラベルなので追加する */) {
+                    pred.push(&i.label);
+                } else {
+                    return Err(BasicBlockListError::UndefinedLabel(j.clone())); 
+                }
+            }
+        }
+
+        let pred_dict = labelmap2idmap(pred_dict, &self)?;
+        let succ_dict = labelmap2idmap(succ_dict, &self)?;
+
+        for i in &mut self.list {
+            i.pred = pred_dict
+                .get(&i.id)
+                .unwrap() // 一旦全てのラベルに対して初期化しているので、ここは安全なunwrap
+                .clone();
+
+            i.succ = succ_dict
+                .get(&i.id)
+                .unwrap() // 一旦全てのラベルに対して初期化しているので、ここは安全なunwrap
+                .clone();
+        }
+
+        Ok(BasicBlockList {
+            list: self.list,
+            _phantom: PhantomData 
+        })
+    }
+}
+
+impl BasicBlockList<AllSetted> {
+
+}
+
+#[derive(Hash, Copy, Clone, PartialEq, Eq, Debug)]
+pub struct BasicBlockId(usize);
+
+impl BasicBlockId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
 /// 基本ブロックの定義
 ///
 /// 1) 次の文を基本ブロックの先頭とする
@@ -163,7 +311,32 @@ pub type Dest = VReg;
 ///   
 pub struct BasicBlock {
     pub label: Label,               // ブロックの入り口（ここにラベルを持つ）
+    pub id: BasicBlockId,
+    pub pred: Vec<BasicBlockId>,
+    pub succ: Vec<BasicBlockId>,
     pub insts: Vec<Instruction>,    // 中身の命令列（ここにはLabelDefは絶対入らない）
+    pub reach: HashSet<VReg>,
+}
+
+impl BasicBlock {
+    /// BasicBlockの最後のブロックの可能なジャンプ先を調べる
+    fn extract_successor_labels(&self) -> Vec<&Label>{
+        if let Some(a) = self.insts.last() {
+            match a {
+                Instruction::Jump { target } => {
+                    vec![target]
+                } 
+                Instruction::Branch { cond:_cond, true_label, false_label } => {
+                    vec![true_label, false_label]
+                } 
+                _ => {
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -302,11 +475,90 @@ pub struct ModuleContext {
 
 #[cfg(test)]
 mod ir_ir_test {
-    use crate::*;
+    use crate::unit::size::Byte;
+    use crate::ir::ir::{BasicBlockList, ConstValue, Func, FuncDef, Instruction, Label, ModuleContext, Operand, Operator, RvIR};
 
-    // #[test]
-    // fn test00 (){
-    // 
-    // }
+    #[test]
+    fn test00 (){
+        let mut mod_ctx = ModuleContext::new();
+
+        let func_id = mod_ctx.create_func(
+            "test_func",
+            Byte::new(0),
+            Byte::new(0x10 * 5));
+
+        {
+            let func = mod_ctx.get_func_mut(func_id).unwrap();
+            let tmp_reg_i = func.vreg_arena.alloc(Byte::new(8), Some(String::from("i")));
+            let tmp_reg_j = func.vreg_arena.alloc(Byte::new(8), Some(String::from("j")));
+            let tmp_reg_c = func.vreg_arena.alloc(Byte::new(8), Some(String::from("c")));
+
+            let mut basic_block_list = BasicBlockList::new();
+
+            // irのユーザーは事前に基本ブロックを構成する必要がある
+            let block_id_0 = basic_block_list.alloc(Label("block0".to_string()));
+            let block_id_1 = basic_block_list.alloc(Label("block1".to_string()));
+            let block_id_2 = basic_block_list.alloc(Label("block2".to_string()));
+            let block_id_3 = basic_block_list.alloc(Label("block3".to_string()));
+            let block_id_4 = basic_block_list.alloc(Label("block4".to_string()));
+            let block_id_5 = basic_block_list.alloc(Label("block5".to_string()));
+
+            basic_block_list.set_inst(
+                block_id_0,
+                vec![
+                Instruction::Assign { dest: tmp_reg_j, src: Operand::Const(ConstValue::I64(10)) },
+                Instruction::Assign { dest: tmp_reg_i, src: Operand::Const(ConstValue::I64(-8)) },
+                Instruction::Jump { target: Label("block1".to_string()) }
+            ]);
+
+            basic_block_list.set_inst( block_id_1, vec![
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_i, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Const(ConstValue::I64(1)) },
+                Instruction::Jump { target: Label("block2".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(block_id_2, vec![
+                Instruction::BinOp { op: Operator::Sub, dest: tmp_reg_j, lhs: Operand::Reg(tmp_reg_j), rhs: Operand::Const(ConstValue::I64(1)) },
+                Instruction::BinOp { op: Operator::Neq, dest: tmp_reg_c, lhs: Operand::Reg(tmp_reg_j), rhs: Operand::Const(ConstValue::I64(0)) },
+                Instruction::Branch {
+                    cond: Operand::Reg(tmp_reg_c), 
+                    true_label: Label("block2".to_string()), 
+                    false_label: Label("block3".to_string()) 
+                }
+            ]);
+
+            basic_block_list.set_inst(block_id_3, vec![ 
+                Instruction::BinOp { op: Operator::Div, dest: tmp_reg_j, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Const(ConstValue::I64(2)) },
+                Instruction::BinOp { op: Operator::Eq, dest: tmp_reg_c, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Const(ConstValue::I64(8)) }, // サンプルのため教科書とは一致しない部分
+                Instruction::Branch {
+                    cond: Operand::Reg(tmp_reg_c), 
+                    true_label: Label("block4".to_string()), 
+                    false_label: Label("block5".to_string()) 
+                }
+
+            ]);
+
+            basic_block_list.set_inst(block_id_4, vec![
+                Instruction::Assign { dest: tmp_reg_i, src: Operand::Const(ConstValue::I64(2)) },
+                Instruction::Jump { target: Label("block5".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(block_id_5, vec![ 
+                Instruction::Jump { target: Label("block2".to_string()) }
+            ]);
+
+            let basic_block_list = basic_block_list.finish_ir_setting();
+            if let Ok(basic_block_list ) = basic_block_list.set_pred_and_succ() {
+                for basic_block in &basic_block_list.list {
+                    println!("{}:", basic_block.label.0);
+                    println!("    basic_block id: {}", basic_block.id.0);
+                    println!("    basic_block pred: {:?}", basic_block.pred);
+                    println!("    basic_block succ: {:?}", basic_block.succ);
+                }
+            } else {
+                println!("failed to setting basic_block_list");
+            }
+        }
+
+    }
 }
 
