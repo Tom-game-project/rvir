@@ -183,6 +183,7 @@ impl BasicBlockList<Setting> {
                 insts: Vec::new(), 
                 vreg_state_set: VregStateSet { 
                     reach: Vec::new(),
+                    live: Vec::new(),
                     def: Vec::new(),
                     kill: Vec::new(),
                     use_: Vec::new(),
@@ -252,56 +253,6 @@ fn labelmap2idmap(
 }
 
 /// 命令列に基づいて、文の集合のuse(x)やdef(x)を定義する
-fn generate_and_set_statement_ids(j: &Instruction, statement_list: &mut StatementList) -> Option<StatementId> {
-    match j { 
-        Instruction::Call { dest, func:_func, args } => {
-            let statement_id = statement_list
-                .gen_vreg_statement(
-                    *dest,
-                    args
-                    .iter()
-                    .filter_map(|operand| 
-                        match *operand {
-                            Operand::Const(_) => None,
-                            Operand::Reg(vreg)=> Some(vreg)
-                    })
-                    .collect::<Vec<VReg>>());
-            Some(statement_id)
-        }
-
-        Instruction::BinOp { op: _op, dest, lhs, rhs } => {
-            let mut p_uses_x =  Vec::new();
-            if let Operand::Reg(vreg) = lhs {
-                p_uses_x.push(*vreg);
-            }
-            if let Operand::Reg(vreg) = rhs {
-                p_uses_x.push(*vreg);
-            }
-            let statement_id = statement_list
-                .gen_vreg_statement(
-                    Some(*dest),
-                    p_uses_x);
-            Some(statement_id)
-        }
-
-        Instruction::Assign { dest, src } => {
-            let statement_id = statement_list
-                .gen_vreg_statement(
-                    Some(*dest),
-                    if let Operand::Reg(vreg) = src { 
-                        vec![*vreg] 
-                    } else { 
-                        Vec::new()
-                    }
-                );
-            Some(statement_id)
-        }
-
-        _ => {
-            None
-        }
-    }
-}
 
 
 /// IRの設定が終わったときに存在するメソッド
@@ -481,6 +432,34 @@ impl BasicBlockList<IRSetted> {
         }
     }
 
+    /// liveを求めるためのループ
+    /// 変化がなくなるまでループさせ続ける
+    fn setup_live_set(&mut self) {
+        let mut live_changed = true;
+
+        while live_changed {
+            live_changed = false;
+            let mut new_live = Vec::new();
+
+            // new_live計算フェーズ
+            for basic_block in &self.list {
+                let a = basic_block.vreg_state_set.derive_new_live(
+                    &basic_block.id, 
+                    &self);
+                new_live.push(a);
+            }
+
+            // 更新フェーズ
+            for (basic_block, new_live) in &mut self.list.iter_mut().zip(new_live) {
+                if set_neq(&basic_block.vreg_state_set.live, &new_live) {
+                    basic_block.vreg_state_set.live = new_live;
+                    live_changed = true;
+                }
+            }
+        }
+
+    }
+
     /// できればBasicBlockListの状態を変えてirを再設定できないようにする
     ///
     /// ir設定後　呼び出されることを想定する
@@ -525,7 +504,7 @@ impl BasicBlockList<IRSetted> {
 
             for j in &basic_block.insts {
                 // 式を「定義」、または「使用」するような命令について、statement_idを割り当てる
-                if let Some(statement_id) = generate_and_set_statement_ids(j, &mut self.statement_list /* 発行されたstatement_idに対応付けられたデータはここに保存される */) {
+                if let Some(statement_id) = self.statement_list.generate_and_set_statement_ids(j) { /* 発行されたstatement_idに対応付けられたデータはここに保存される */
                     basic_block.statement_id_list.push(statement_id);
                 }
             }
@@ -539,6 +518,7 @@ impl BasicBlockList<IRSetted> {
 
         self.setup_use_set();
         self.setup_kill_dash_set();
+        self.setup_live_set();
 
         Ok(BasicBlockList {
             list: self.list,
@@ -587,6 +567,57 @@ impl StatementList {
     fn get_vreg_statement_by_id(&self, statement_id: StatementId) -> &VregStatement {
         &self.statements[statement_id.0]
     }
+
+    fn generate_and_set_statement_ids(&mut self, j: &Instruction) -> Option<StatementId> {
+        match j { 
+            Instruction::Call { dest, func:_func, args } => {
+                let statement_id = self
+                    .gen_vreg_statement(
+                        *dest,
+                        args
+                        .iter()
+                        .filter_map(|operand| 
+                            match *operand {
+                                Operand::Const(_) => None,
+                                Operand::Reg(vreg)=> Some(vreg)
+                        })
+                        .collect::<Vec<VReg>>());
+                Some(statement_id)
+            }
+
+            Instruction::BinOp { op: _op, dest, lhs, rhs } => {
+                let mut p_uses_x =  Vec::new();
+                if let Operand::Reg(vreg) = lhs {
+                    p_uses_x.push(*vreg);
+                }
+                if let Operand::Reg(vreg) = rhs {
+                    p_uses_x.push(*vreg);
+                }
+                let statement_id = self
+                    .gen_vreg_statement(
+                        Some(*dest),
+                        p_uses_x);
+                Some(statement_id)
+            }
+
+            Instruction::Assign { dest, src } => {
+                let statement_id = self
+                    .gen_vreg_statement(
+                        Some(*dest),
+                        if let Operand::Reg(vreg) = src { 
+                            vec![*vreg] 
+                        } else { 
+                            Vec::new()
+                        }
+                    );
+                Some(statement_id)
+            }
+
+            _ => {
+                None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -604,6 +635,7 @@ pub struct VregStatement {
 // 
 pub struct VregStateSet {
     reach: Vec<bool>,
+    live: Vec<bool>,
     /// DEF(B)の設定
     /// ある変数xについてp(def(x)) ∈ Bで且つpの後にp'(def(x)) ∈ Bなるp'が無い
     /// Bの中で定義され、Bの出口まで有効な文の集合
@@ -616,7 +648,7 @@ pub struct VregStateSet {
     use_: Vec<bool>,
     /// KILL'(B)
     /// p(def(x)) ∈ なるpがある 
-    kill_dash: Vec<bool>
+    kill_dash: Vec<bool>,
 }
 
 // VregStateSet helper functions
@@ -655,6 +687,7 @@ impl VregStateSet {
     fn new(v: &StatementList) -> Self {
         Self { // すべて空集合として設定する
             reach: vec![false; v.statements.len()], 
+            live: vec![false; v.statements.len()], 
             def: vec![false; v.statements.len()],
             kill: vec![false; v.statements.len()],
             use_: vec![false; v.statements.len()],
@@ -702,7 +735,7 @@ impl VregStateSet {
     }
 
     /// reachのcore logic
-    fn derive_new_reach (&self,basic_block_id: &BasicBlockId, basic_block_list: &BasicBlockList<IRSetted>) -> Vec<bool> {
+    fn derive_new_reach (&self, basic_block_id: &BasicBlockId, basic_block_list: &BasicBlockList<IRSetted>) -> Vec<bool> {
         let current_basic_block = basic_block_list.get_basic_block(*basic_block_id);
         let new_reach: Vec<bool> = current_basic_block
             .pred // すべての先行ブロックについて、
@@ -721,8 +754,21 @@ impl VregStateSet {
     }
 
     /// liveのcore logic
-    fn derive_new_live() {
+    fn derive_new_live(&self, basic_block_id: &BasicBlockId, basic_block_list: &BasicBlockList<IRSetted>) -> Vec<bool> {
+        let current_basic_block = basic_block_list.get_basic_block(*basic_block_id);
+        let new_live = set_or(
+            &current_basic_block.vreg_state_set.use_, 
+            &set_minus(
+                &current_basic_block
+                .succ
+                .iter()
+                .fold(vec![false; basic_block_list.statement_list.statements.len()], |mut acc, pred_basic_block_id| {
+                    let pred_block = basic_block_list.get_basic_block(*pred_basic_block_id);
+                    acc = set_or(&pred_block.vreg_state_set.live, &acc);
+                    acc }), 
+                &current_basic_block.vreg_state_set.kill_dash));
 
+        new_live
     }
 }
 
@@ -988,6 +1034,7 @@ mod ir_ir_test {
                     println!("    basic_block pred: {:?}", basic_block.pred);
                     println!("    basic_block succ: {:?}", basic_block.succ);
                     println!("    reach {:?}", basic_block.vreg_state_set.reach);
+                    println!("    live {:?}", basic_block.vreg_state_set.live);
                     println!("    def {:?}", basic_block.vreg_state_set.def);
                     println!("    kill {:?}", basic_block.vreg_state_set.kill);
                     println!("    use {:?}", basic_block.vreg_state_set.use_);
