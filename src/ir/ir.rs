@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::os::linux::raw::stat;
 
 use crate::unit::size::Byte;
 
@@ -186,6 +185,8 @@ impl BasicBlockList<Setting> {
                     reach: Vec::new(),
                     def: Vec::new(),
                     kill: Vec::new(),
+                    use_: Vec::new(),
+                    kill_dash: Vec::new()
                 },
                 // 定義、生存区間解析用
                 statement_id_list: Vec::new(),
@@ -250,6 +251,7 @@ fn labelmap2idmap(
         ))
 }
 
+/// 命令列に基づいて、文の集合のuse(x)やdef(x)を定義する
 fn generate_and_set_statement_ids(j: &Instruction, statement_list: &mut StatementList) -> Option<StatementId> {
     match j { 
         Instruction::Call { dest, func:_func, args } => {
@@ -301,6 +303,7 @@ fn generate_and_set_statement_ids(j: &Instruction, statement_list: &mut Statemen
     }
 }
 
+
 /// IRの設定が終わったときに存在するメソッド
 impl BasicBlockList<IRSetted> {
 
@@ -312,10 +315,178 @@ impl BasicBlockList<IRSetted> {
         self.list.iter().find(|b | b.label == *label)
     }
 
-    /// TODO: グラフを作る
+    // vreg_state_set setup functions
+
+    /// def, kill,の初期化
+    /// DEF(B)の設定
+    /// ある変数xについてp(def(x)) ∈ Bで且つpの後にp'(def(x)) ∈ Bなるp'が無い
+    /// Bの中で定義され、Bの出口まで有効な文の集合
+    fn setup_def_set(&mut self) {
+        // def, kill,の初期化
+
+        // DEF(B)の設定
+        // ある変数xについてp(def(x)) ∈ Bで且つpの後にp'(def(x)) ∈ Bなるp'が無い
+        // Bの中で定義され、Bの出口まで有効な文の集合
+        for basic_block in &mut self.list {
+            basic_block.vreg_state_set = VregStateSet::new(&self.statement_list);
+
+            // DEF(B:Block): Set<StatementId>
+            let mut def_statement = Vec::new();
+            // currentについて、DEF(B)になるかどうかを調べ、満たしていれば
+            for (i, current) in basic_block.statement_id_list.iter().enumerate() {
+                // 現在のインデックス + 1 から最後までを切り出す
+                let rest = &basic_block.statement_id_list[i + 1..];
+
+                let current_vreg_statement = self.statement_list.get_vreg_statement_by_id(*current);
+
+                if let Some(current_vreg) = current_vreg_statement.p_def_x {
+                    // 現在の文が変数を定義しているとき
+                    if rest.iter().any(|j| {
+                        let succ_vreg_statement = self.statement_list.get_vreg_statement_by_id(*j);
+                        if let Some(succ_vreg) = succ_vreg_statement.p_def_x {
+                            current_vreg == succ_vreg
+                        } else {
+                            false
+                        }
+                    }) {
+                        // 後続する同じブロック内に同じ仮想レジスタを上書きする定義がある
+                    } else {
+                        // 後続する同じブロック内に同じ仮想レジスタを上書きする定義がない
+                        def_statement.push(*current);
+                    }
+                } else {
+                    // 現在の変数は何も定義していない
+                }
+                // println!("処理中: {}, 後続のデータ: {:?}", current, rest);
+            }
+            basic_block.vreg_state_set.set_def(def_statement);
+            // KILL(B)の設定
+            // ブロック内で宣言された変数を上書きするような文の集合
+        }
+    }
+
+    // Kill(B)の設定
+    // 自分のブロック内で定義された変数を上書きするような文の集合
+    //
+    fn setup_kill_set(&mut self) {
+        // Kill(B)の設定
+        //
+        // 自分のブロック内で定義された変数を上書きするような文の集合
+        //
+        let statement_id_list = self.list.iter().map(|basic_block| {
+            // DEF(B:Block): Set<StatementId>
+            let vregs_defined_in_this_blcok = basic_block
+                .statement_id_list
+                .iter()
+                .fold(Vec::<VReg>::new(), |mut acc, statement_id| {
+                    let vreg_statement = self.statement_list.get_vreg_statement_by_id(*statement_id);
+                    if let Some(defined_vreg) = vreg_statement.p_def_x {
+                        acc.push(defined_vreg);
+                    }
+                    acc
+                });
+
+            let kill_statement = self.list
+                .iter()
+                .fold(Vec::<StatementId>::new(), |mut acc, b| {
+                    // 自分を含まないブロックのなかで、同じレジスタが上書きされている場合はその文を追加
+                    if basic_block.id != b.id {
+                        for other_statement_id in &b.statement_id_list {
+                            let vreg_statement = self.statement_list.get_vreg_statement_by_id(*other_statement_id);
+                            if let Some(vreg) = vreg_statement.p_def_x {
+                                if vregs_defined_in_this_blcok.contains(&vreg) {
+                                    acc.push(*other_statement_id);
+                                }
+                            }
+                        }
+                    }
+                    acc
+                });
+
+            kill_statement
+        }).collect::<Vec<Vec<StatementId>>>();
+
+        // 所有権の問題で切り分けている
+        for (basic_block, statement_id_list) in self.list.iter_mut().zip(statement_id_list) {
+            basic_block.vreg_state_set.set_kill(statement_id_list);
+        }
+    }
+
+    fn setup_use_set(&mut self) {
+        for basic_block in &mut self.list {
+            // [p0, p1, p2, ...]
+            let statement_id_list = basic_block.statement_id_list.iter().enumerate().fold(Vec::<StatementId>::new(),|mut acc, (index, statement_id)| 
+                {
+                    let statement = self.statement_list.get_vreg_statement_by_id(*statement_id);
+                    if basic_block.statement_id_list[0..index]
+                        .iter()
+                        .all(|pre_statement_id|{
+                        let pre_statement = self.statement_list.get_vreg_statement_by_id(*pre_statement_id);
+                        if let Some (def_vreg) = pre_statement.p_def_x {
+                            // pre_statementに上書きされていなければOk
+                            !statement.p_uses_x.contains(&def_vreg)
+                        } else {
+                            // 何もない場合は、「xの定義はない」に該当するため
+                            true
+                        }
+                    }) /*もし、自分の使っている変数がブロックの開始から現在の文まで上書きされていなければ*/ {
+                        acc.push(*statement_id);
+                    }
+                    acc
+                });
+
+            basic_block.vreg_state_set.set_use(statement_id_list);
+        }
+    }
+
+    fn setup_kill_dash_set(&mut self) {
+        for basic_block in &mut self.list {
+            let statement_id_list = basic_block
+                .statement_id_list
+                .iter()
+                .filter(|&&statement_id| {
+                    let statement = self.statement_list.get_vreg_statement_by_id(statement_id);
+                    statement.p_def_x.is_some()
+                })
+                .copied()
+                .collect::<Vec<StatementId>>();
+            basic_block.vreg_state_set.set_kill_dash(statement_id_list);
+        }
+    }
+
+    /// reachを求めるためのループ
+    /// 変化がなくなるまでループさせ続ける
+    fn setup_reach_set(&mut self) {
+        let mut reach_changed = true;
+
+        while reach_changed {
+            reach_changed = false;
+            let mut new_reaches = Vec::new();
+
+            // new_reach計算フェーズ
+            for basic_block in &self.list {
+                let a = basic_block.vreg_state_set.derive_new_reach(
+                    &basic_block.id, 
+                    &self);
+                new_reaches.push(a);
+            }
+
+            // 更新フェーズ
+            for (basic_block, new_reach) in &mut self.list.iter_mut().zip(new_reaches) {
+                if set_neq(&basic_block.vreg_state_set.reach, &new_reach) {
+                    basic_block.vreg_state_set.reach = new_reach;
+                    reach_changed = true;
+                }
+            }
+        }
+    }
+
     /// できればBasicBlockListの状態を変えてirを再設定できないようにする
     ///
     /// ir設定後　呼び出されることを想定する
+    ///
+    /// BasicBlock(.pred, .succ)を設定
+    /// vreg_state_set:VregStateSetの各種パラメータの設定をする
     pub fn set_pred_and_succ(mut self) -> Result<BasicBlockList<AllSetted>, BasicBlockListError> {
         let mut pred_dict : HashMap<&Label, Vec<&Label>> = HashMap::new();
         let mut succ_dict : HashMap<&Label, Vec<&Label>> = HashMap::new();
@@ -362,117 +533,12 @@ impl BasicBlockList<IRSetted> {
 
         // self.statement_listですべてのブロック内に存在する文の収集が完了する
 
-        // def, kill,の初期化
+        self.setup_def_set();
+        self.setup_kill_set();
+        self.setup_reach_set();
 
-        // DEF(B)の設定
-        // ある変数xについてp(def(x)) ∈ Bで且つpの後にp'(def(x)) ∈ Bなるp'が無い
-        // Bの中で定義され、Bの出口まで有効な文の集合
-        for basic_block in &mut self.list {
-            basic_block.vreg_state_set = VregStateSet::new(&self.statement_list);
-
-            // DEF(B:Block): Set<StatementId>
-            let mut def_statement = Vec::new();
-            // currentについて、DEF(B)になるかどうかを調べ、満たしていれば
-            for (i, current) in basic_block.statement_id_list.iter().enumerate() {
-                // 現在のインデックス + 1 から最後までを切り出す
-                let rest = &basic_block.statement_id_list[i + 1..];
-
-                let current_vreg_statement = self.statement_list.get_vreg_statement_by_id(*current);
-
-                if let Some(current_vreg) = current_vreg_statement.p_def_x {
-                    // 現在の文が変数を定義しているとき
-                    if rest.iter().any(|j| {
-                        let succ_vreg_statement = self.statement_list.get_vreg_statement_by_id(*j);
-                        if let Some(succ_vreg) = succ_vreg_statement.p_def_x {
-                            current_vreg == succ_vreg
-                        } else {
-                            false
-                        }
-                    }) {
-                        // 後続する同じブロック内に同じ仮想レジスタを上書きする定義がある
-                    } else {
-                        // 後続する同じブロック内に同じ仮想レジスタを上書きする定義がない
-                        def_statement.push(*current);
-                    }
-                } else {
-                    // 現在の変数は何も定義していない
-                }
-                // println!("処理中: {}, 後続のデータ: {:?}", current, rest);
-            }
-            basic_block.vreg_state_set.set_def(def_statement);
-
-            // KILL(B)の設定
-            // ブロック内で宣言された変数を上書きするような文の集合
-        }
-
-        // Kill(B)の設定
-        //
-        // 自分のブロック内で定義された変数を上書きするような文の集合
-        //
-        let statement_id_list = self.list.iter().map(|basic_block| {
-            // DEF(B:Block): Set<StatementId>
-            let vregs_defined_in_this_blcok = basic_block
-                .statement_id_list
-                .iter()
-                .fold(Vec::<VReg>::new(), |mut acc, statement_id| {
-                    let vreg_statement = self.statement_list.get_vreg_statement_by_id(*statement_id);
-                    if let Some(defined_vreg) = vreg_statement.p_def_x {
-                        acc.push(defined_vreg);
-                    }
-                    acc
-                });
-
-            let kill_statement = self.list
-                .iter()
-                .fold(Vec::<StatementId>::new(), |mut acc, b| {
-                    // 自分を含まないブロックのなかで、同じレジスタが上書きされている場合はその文を追加
-                    if basic_block.id != b.id {
-                        for other_statement_id in &b.statement_id_list {
-                            let vreg_statement = self.statement_list.get_vreg_statement_by_id(*other_statement_id);
-                            if let Some(vreg) = vreg_statement.p_def_x {
-                                if vregs_defined_in_this_blcok.contains(&vreg) {
-                                    acc.push(*other_statement_id);
-                                }
-                            }
-                        }
-                    }
-                    acc
-                });
-
-            kill_statement
-        }).collect::<Vec<Vec<StatementId>>>();
-
-        // 所有権の問題で切り分けている
-        for (basic_block, statement_id_list) in self.list.iter_mut().zip(statement_id_list) {
-            basic_block.vreg_state_set.set_kill(statement_id_list);
-        }
-
-        let mut reach_changed = true;
-
-        while reach_changed {
-            reach_changed = false;
-            let mut new_reaches = Vec::new();
-
-            // new_reach計算フェーズ
-            for basic_block in &self.list {
-                let a = basic_block.vreg_state_set.derive_new_reach(
-                    &basic_block.id, 
-                    &self);
-                new_reaches.push(a);
-            }
-
-            // for i in &new_reaches {
-            //     println!("hello world {:?}", i);
-            // }
-
-            // 更新フェーズ
-            for (basic_block, new_reach) in &mut self.list.iter_mut().zip(new_reaches) {
-                if set_neq(&basic_block.vreg_state_set.reach, &new_reach) {
-                    basic_block.vreg_state_set.reach = new_reach;
-                    reach_changed = true;
-                }
-            }
-        }
+        self.setup_use_set();
+        self.setup_kill_dash_set();
 
         Ok(BasicBlockList {
             list: self.list,
@@ -545,9 +611,17 @@ pub struct VregStateSet {
     /// Kill(B)の設定
     /// 自分のブロック内で定義された変数を上書きするような文の集合
     kill: Vec<bool>,
+    /// USE(B)
+    /// p(use(x)) ∈ Bで、且つBの入口からpまでの間にxの定義がない
+    use_: Vec<bool>,
+    /// KILL'(B)
+    /// p(def(x)) ∈ なるpがある 
+    kill_dash: Vec<bool>
 }
 
-// VregStateSet helper
+// VregStateSet helper functions
+
+// Vec<bool>形式の集合を扱いやすくするために導入した表現をStatementIdに直す
 fn derive_vreg_statement_id_from_bool_list(l: &[bool]) -> Vec<StatementId> {
     l
     .iter()
@@ -583,8 +657,12 @@ impl VregStateSet {
             reach: vec![false; v.statements.len()], 
             def: vec![false; v.statements.len()],
             kill: vec![false; v.statements.len()],
+            use_: vec![false; v.statements.len()],
+            kill_dash: vec![false; v.statements.len()],
         }
     }
+
+    // setting functions 
 
     /// DEF(B1) = {p1, p2}
     /// の場合
@@ -601,6 +679,18 @@ impl VregStateSet {
         }
     }
 
+    fn set_use(&mut self, statement_id_list: Vec<StatementId>) {
+        for i in statement_id_list {
+            self.use_[i.0] = true;
+        }
+    }
+
+    fn set_kill_dash(&mut self, statement_id_list: Vec<StatementId>) {
+        for i in statement_id_list {
+            self.kill_dash[i.0] = true;
+        }
+    }
+
     // statement_idのリストを返す
 
     pub fn get_def_statement_id_list(&self) -> Vec<StatementId> {
@@ -611,7 +701,8 @@ impl VregStateSet {
         derive_vreg_statement_id_from_bool_list(&self.kill)
     }
 
-    fn derive_new_reach (&self, basic_block_id: &BasicBlockId, basic_block_list: &BasicBlockList<IRSetted>) -> Vec<bool> {
+    /// reachのcore logic
+    fn derive_new_reach (&self,basic_block_id: &BasicBlockId, basic_block_list: &BasicBlockList<IRSetted>) -> Vec<bool> {
         let current_basic_block = basic_block_list.get_basic_block(*basic_block_id);
         let new_reach: Vec<bool> = current_basic_block
             .pred // すべての先行ブロックについて、
@@ -627,6 +718,11 @@ impl VregStateSet {
             });
     
         new_reach
+    }
+
+    /// liveのcore logic
+    fn derive_new_live() {
+
     }
 }
 
@@ -894,6 +990,7 @@ mod ir_ir_test {
                     println!("    reach {:?}", basic_block.vreg_state_set.reach);
                     println!("    def {:?}", basic_block.vreg_state_set.def);
                     println!("    kill {:?}", basic_block.vreg_state_set.kill);
+                    println!("    use {:?}", basic_block.vreg_state_set.use_);
                 }
             } else {
                 println!("failed to setting basic_block_list");
