@@ -160,6 +160,7 @@ pub struct AllSetted;
 
 pub struct BasicBlockList<State> {
     pub list: Vec<BasicBlock>,
+    pub entry_basic_block_id: BasicBlockId,
     pub statement_list: StatementList,
     _phantom: PhantomData<State>
 }
@@ -168,6 +169,7 @@ impl BasicBlockList<Setting> {
     pub fn new() -> Self {
         Self { 
             list: Vec::new(),
+            entry_basic_block_id: BasicBlockId(0),
             statement_list: StatementList { statements: Vec::new() },
             _phantom: PhantomData }
     }
@@ -181,6 +183,7 @@ impl BasicBlockList<Setting> {
                 pred: Vec::new(), 
                 succ: Vec::new(), 
                 insts: Vec::new(), 
+                dom: Vec::new(),
                 vreg_state_set: VregStateSet { 
                     reach: Vec::new(),
                     live: Vec::new(),
@@ -200,10 +203,15 @@ impl BasicBlockList<Setting> {
         self.list[id.0].insts = insts;
     }
 
+    pub fn set_entry_block(&mut self, basic_block_id: BasicBlockId) {
+        self.entry_basic_block_id = basic_block_id;
+    }
+
     /// irの設定が終了したら、状態を移す
     pub fn finish_ir_setting (self) -> BasicBlockList<IRSetted> {
         BasicBlockList { 
             list: self.list,
+            entry_basic_block_id: self.entry_basic_block_id,
             statement_list: StatementList { statements: Vec::new() },
             _phantom: PhantomData 
         }
@@ -253,7 +261,6 @@ fn labelmap2idmap(
 }
 
 /// 命令列に基づいて、文の集合のuse(x)やdef(x)を定義する
-
 
 /// IRの設定が終わったときに存在するメソッド
 impl BasicBlockList<IRSetted> {
@@ -460,6 +467,60 @@ impl BasicBlockList<IRSetted> {
 
     }
 
+    /// すべてのbasic blockの支配ブロックを計算する
+    fn setup_dom(&mut self) {
+        // basic_blockを格納するリストの長さ
+        let length = self.list.len();
+
+        // 初期設定
+        for basic_block in &mut self.list {
+            if basic_block.id == self.entry_basic_block_id {
+                // DOM(B0) = {B0}
+                // プログラムの先頭だったとき
+                basic_block.dom = basic_block.only_contain_my_self(length);
+            } else {
+                // DOM(B) = { ブロック全体 } (B not eq B0)
+                basic_block.dom = vec![true; length];
+            }
+        }
+
+        let mut dom_changed = true;
+        while dom_changed {
+            dom_changed = false;
+            let mut new_doms = Vec::new();
+
+            for basic_block in &self.list {
+                if basic_block.id == self.entry_basic_block_id {
+                    new_doms.push(basic_block.only_contain_my_self(length));
+                    continue;
+                }
+
+                new_doms.push(
+                    set_or(
+                        &basic_block.only_contain_my_self(length),
+                        &basic_block
+                            .pred
+                            .iter()
+                            .fold(
+                                vec![true; length],
+                                |mut acc, pred_basic_block_id| {
+                            let pred_basic_block = self.get_basic_block(*pred_basic_block_id);
+                            acc = set_and(&acc, &pred_basic_block.dom);
+                            acc
+                        })
+                    )
+                );
+            }
+
+            for (basic_block, new_dom) in self.list.iter_mut().zip(new_doms) {
+                if set_neq(&basic_block.dom, &new_dom) {
+                    basic_block.dom = new_dom;
+                    dom_changed = true;
+                }
+            }
+        }
+    }
+
     /// できればBasicBlockListの状態を変えてirを再設定できないようにする
     ///
     /// ir設定後　呼び出されることを想定する
@@ -520,8 +581,11 @@ impl BasicBlockList<IRSetted> {
         self.setup_kill_dash_set();
         self.setup_live_set();
 
+        self.setup_dom();
+
         Ok(BasicBlockList {
             list: self.list,
+            entry_basic_block_id: self.entry_basic_block_id,
             statement_list: self.statement_list,
             _phantom: PhantomData 
         })
@@ -529,10 +593,6 @@ impl BasicBlockList<IRSetted> {
 }
 
 impl BasicBlockList<AllSetted> {
-
-    /// reachを導出する
-    pub fn derive_reach(mut self) {
-    }
 }
 
 #[derive(Hash, Copy, Clone, PartialEq, Eq, Debug)]
@@ -670,6 +730,10 @@ fn set_or (a: &[bool], b: &[bool]) -> Vec<bool> {
     a.iter().zip(b).map(|(i, j)| *i || *j).collect()
 }
 
+fn set_and (a: &[bool], b: &[bool]) -> Vec<bool> {
+    a.iter().zip(b).map(|(i, j)| *i && *j).collect()
+}
+
 fn set_minus (a: &[bool], b: &[bool]) -> Vec<bool> {
     a.iter().zip(b).map(|(i, j)| *i && !*j).collect()
 }
@@ -760,12 +824,12 @@ impl VregStateSet {
             &current_basic_block.vreg_state_set.use_, 
             &set_minus(
                 &current_basic_block
-                .succ
-                .iter()
-                .fold(vec![false; basic_block_list.statement_list.statements.len()], |mut acc, pred_basic_block_id| {
-                    let pred_block = basic_block_list.get_basic_block(*pred_basic_block_id);
-                    acc = set_or(&pred_block.vreg_state_set.live, &acc);
-                    acc }), 
+                    .succ
+                    .iter()
+                    .fold(vec![false; basic_block_list.statement_list.statements.len()], |mut acc, pred_basic_block_id| {
+                        let pred_block = basic_block_list.get_basic_block(*pred_basic_block_id);
+                        acc = set_or(&pred_block.vreg_state_set.live, &acc);
+                        acc }), 
                 &current_basic_block.vreg_state_set.kill_dash));
 
         new_live
@@ -789,7 +853,9 @@ pub struct BasicBlock {
     pub succ: Vec<BasicBlockId>,
     pub insts: Vec<Instruction>,    // 中身の命令列（ここにはLabelDefは絶対入らない）
     /// 「生存区間」、「到達する定義」のチェック
-    pub vreg_state_set: VregStateSet,
+    pub vreg_state_set: VregStateSet, // 文の集合
+    // 自分を支配するブロックの集合
+    pub dom: Vec<bool>, // BasicBlockList.listのindexに対応
     /// このブロック内に含まれる、変数を操作する文
     pub statement_id_list: Vec<StatementId>,
 }
@@ -812,6 +878,22 @@ impl BasicBlock {
         } else {
             Vec::new()
         }
+    }
+
+    fn only_contain_my_self(&self, length_of_basic_block_list: usize) -> Vec<bool>{
+        let mut b = vec![false; length_of_basic_block_list];
+        b[self.id.0] = true;
+        b
+    }
+
+    /// 自分の支配ブロックを出力する
+    fn get_dom_basic_block_ids(&self) -> Vec<BasicBlockId> {
+        self.dom.iter().enumerate().fold(Vec::<BasicBlockId>::new(), |mut acc, (id, b)| {
+            if *b {
+                acc.push(BasicBlockId(id))
+            }
+            acc
+        })
     }
 }
 
@@ -1031,13 +1113,161 @@ mod ir_ir_test {
                 for basic_block in &basic_block_list.list {
                     println!("{}:", basic_block.label.0);
                     println!("    basic_block id: {}", basic_block.id.0);
-                    println!("    basic_block pred: {:?}", basic_block.pred);
-                    println!("    basic_block succ: {:?}", basic_block.succ);
+                    // println!("    basic_block pred: {:?}", basic_block.pred);
+                    // println!("    basic_block succ: {:?}", basic_block.succ);
                     println!("    reach {:?}", basic_block.vreg_state_set.reach);
                     println!("    live {:?}", basic_block.vreg_state_set.live);
-                    println!("    def {:?}", basic_block.vreg_state_set.def);
-                    println!("    kill {:?}", basic_block.vreg_state_set.kill);
-                    println!("    use {:?}", basic_block.vreg_state_set.use_);
+                    // println!("    def {:?}", basic_block.vreg_state_set.def);
+                    // println!("    kill {:?}", basic_block.vreg_state_set.kill);
+                    // println!("    use {:?}", basic_block.vreg_state_set.use_);
+                }
+            } else {
+                println!("failed to setting basic_block_list");
+            }
+        }
+
+    }
+
+    #[test]
+    fn test01() {
+        let mut mod_ctx = ModuleContext::new();
+
+        let func_id = mod_ctx.create_func(
+            "test_func",
+            Byte::new(0),
+            Byte::new(0x10 * 6));
+
+        {
+            let func = mod_ctx.get_func_mut(func_id).unwrap();
+            let tmp_reg_a = func.vreg_arena.alloc(Byte::new(8), Some(String::from("a")));
+            let tmp_reg_b = func.vreg_arena.alloc(Byte::new(8), Some(String::from("b")));
+            let tmp_reg_c = func.vreg_arena.alloc(Byte::new(8), Some(String::from("c")));
+            let tmp_reg_d = func.vreg_arena.alloc(Byte::new(8), Some(String::from("d")));
+            let tmp_reg_e = func.vreg_arena.alloc(Byte::new(8), Some(String::from("e")));
+
+            let mut basic_block_list = BasicBlockList::new();
+
+            // irのユーザーは事前に基本ブロックを構成する必要がある
+            let block_id_0 = basic_block_list.alloc(Label("block0".to_string()));
+            let block_id_1 = basic_block_list.alloc(Label("block1".to_string()));
+
+            let basic_block_start = basic_block_list.alloc(Label("block_start".to_string()));
+
+            basic_block_list.set_inst(
+                basic_block_start,
+                vec![
+                Instruction::Assign { dest: tmp_reg_d, src: Operand::Const(ConstValue::I64(0)) },
+                Instruction::Jump { target: Label("block0".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_0,
+                vec![
+                Instruction::BinOp { op: Operator::Mul, dest: tmp_reg_a, lhs: Operand::Reg(tmp_reg_d), rhs: Operand::Const(ConstValue::I64(2)) },
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_b, lhs: Operand::Reg(tmp_reg_a), rhs: Operand::Reg(tmp_reg_e) },
+                Instruction::BinOp { op: Operator::Mul, dest: tmp_reg_c, lhs: Operand::Reg(tmp_reg_a), rhs: Operand::Const(ConstValue::I64(3)) },
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_d, lhs: Operand::Reg(tmp_reg_b), rhs: Operand::Reg(tmp_reg_c) },
+                Instruction::BinOp { op: Operator::Sub, dest: tmp_reg_e, lhs: Operand::Reg(tmp_reg_d), rhs: Operand::Const(ConstValue::I64(5)) },
+                Instruction::Jump { target: Label("block1".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_1,
+                vec![
+                Instruction::Jump { target: Label("block0".to_string()) }
+            ]);
+
+            let basic_block_list = basic_block_list.finish_ir_setting();
+            if let Ok(basic_block_list ) = basic_block_list.set_pred_and_succ() {
+                for basic_block in &basic_block_list.list {
+                    println!("{}:", basic_block.label.0);
+                    println!("    basic_block id: {}", basic_block.id.0);
+                    // println!("    basic_block pred: {:?}", basic_block.pred);
+                    // println!("    basic_block succ: {:?}", basic_block.succ);
+                    println!("    reach {:?}", basic_block.vreg_state_set.reach);
+                    println!("    live {:?}", basic_block.vreg_state_set.live);
+                    // println!("    def {:?}", basic_block.vreg_state_set.def);
+                    // println!("    kill {:?}", basic_block.vreg_state_set.kill);
+                    // println!("    use {:?}", basic_block.vreg_state_set.use_);
+                    // println!("    dom {:?}", basic_block.dom)
+                    // println!("    dom {:?}", basic_block.get_dom_basic_block_ids());
+                }
+            } else {
+                println!("failed to setting basic_block_list");
+            }
+        }
+    }
+
+    /// DOMが導出できているかどうかを確認する
+    #[test]
+    fn test02() {
+        let mut mod_ctx = ModuleContext::new();
+
+        let func_id = mod_ctx.create_func(
+            "test_func",
+            Byte::new(0),
+            Byte::new(0x10 * 6));
+
+        {
+            let func = mod_ctx.get_func_mut(func_id).unwrap();
+
+            let mut basic_block_list = BasicBlockList::new();
+
+            // irのユーザーは事前に基本ブロックを構成する必要がある
+            let block_id_0 = basic_block_list.alloc(Label("block0".to_string()));
+            let block_id_1 = basic_block_list.alloc(Label("block1".to_string()));
+            let block_id_2 = basic_block_list.alloc(Label("block2".to_string()));
+            let block_id_3 = basic_block_list.alloc(Label("block3".to_string()));
+
+            let block_id_exit = basic_block_list.alloc(Label("exit".to_string()));
+
+            basic_block_list.set_inst(
+                block_id_0,
+                vec![
+                // Instruction::Jump { target: Label("block1".to_string()) }
+                Instruction::Branch { 
+                    cond: Operand::Const(ConstValue::I64(0)), 
+                    true_label: Label("exit".to_string()),
+                    false_label: Label("block1".to_string()) ,
+                }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_1,
+                vec![
+                // Instruction::Jump { target: Label("block1".to_string()) }
+                Instruction::Branch { 
+                    cond: Operand::Const(ConstValue::I64(0)),
+                    true_label: Label("block2".to_string()),
+                    false_label: Label("block3".to_string()),
+                }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_2,
+                vec![
+                Instruction::Jump { target: Label("block0".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_3,
+                vec![
+                Instruction::Jump { target: Label("block0".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_exit, 
+                vec![]
+            );
+
+            basic_block_list.set_entry_block(block_id_0);
+
+            let basic_block_list = basic_block_list.finish_ir_setting();
+            if let Ok(basic_block_list ) = basic_block_list.set_pred_and_succ() {
+                for basic_block in &basic_block_list.list {
+                    println!("{}:", basic_block.label.0);
+                    println!("    basic_block id: {}", basic_block.id.0);
+                    println!("    dom {:?}", basic_block.get_dom_basic_block_ids());
                 }
             } else {
                 println!("failed to setting basic_block_list");
