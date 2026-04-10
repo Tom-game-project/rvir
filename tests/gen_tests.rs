@@ -1,10 +1,8 @@
-
-use rvir::*;
-
 #[cfg(test)]
-mod gen_tests {
+mod hello {
+    use rvir::*;
     #[test]
     fn test00() {
-
+        //
     }
 }
