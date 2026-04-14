@@ -2,13 +2,14 @@
 /// cargo test --features test-utils  ir_tests::test03 -- --nocapture
 /// ```
 mod ir_tests {
+    use rvir::codegen::rv64::{RvPhysReg, RvPhysStack};
     use rvir::unit::size::Byte;
     use rvir::ir::ir::{BasicBlockList, ConstValue, Instruction, Label, ModuleContext, Operand, Operator};
 
     ///
     #[test]
     fn test00 (){
-        let mut mod_ctx = ModuleContext::new();
+        let mut mod_ctx = ModuleContext::<RvPhysReg, RvPhysStack>::new();
 
         let func_id = mod_ctx.create_func(
             "test_func",
@@ -92,7 +93,7 @@ mod ir_tests {
     ///
     #[test]
     fn test01() {
-        let mut mod_ctx = ModuleContext::new();
+        let mut mod_ctx = ModuleContext::<RvPhysReg, RvPhysStack>::new();
 
         let func_id = mod_ctx.create_func(
             "test_func",
@@ -156,7 +157,7 @@ mod ir_tests {
     /// DOMが導出できているかどうかを確認する
     #[test]
     fn test02() {
-        let mut mod_ctx = ModuleContext::new();
+        let mut mod_ctx = ModuleContext::<RvPhysReg, RvPhysStack>::new();
 
         let func_id = mod_ctx.create_func(
             "test_func",
@@ -232,7 +233,7 @@ mod ir_tests {
 
     #[test]
     fn test03() {
-        let mut mod_ctx = ModuleContext::new();
+        let mut mod_ctx = ModuleContext::<RvPhysReg, RvPhysStack>::new();
 
         let func_id = mod_ctx.create_func(
             "test_func",

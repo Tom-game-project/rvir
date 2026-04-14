@@ -1,4 +1,4 @@
-use crate::codegen::rv64::{PhysReg};
+use crate::codegen::rv64::{RvPhysReg};
 
 /// 最終的なアセンブリプログラム全体を表現する構造体
 #[derive(Debug, Clone)]
@@ -30,37 +30,37 @@ pub enum Directive {
 pub enum RvInst {
     // --- R-Type (レジスタ間演算) ---
     /// レジスタrdに加算の結果を書き込む
-    Add { rd: PhysReg, rs1: PhysReg, rs2: PhysReg },
+    Add { rd: RvPhysReg, rs1: RvPhysReg, rs2: RvPhysReg },
     /// レジスタrdに加算の結果を書き込む
-    Sub { rd: PhysReg, rs1: PhysReg, rs2: PhysReg },
+    Sub { rd: RvPhysReg, rs1: RvPhysReg, rs2: RvPhysReg },
 
     // --- I-Type (即値演算・ロード) ---
     /// レジスタrdに加算の結果を書き込む
-    Addi { rd: PhysReg, rs1: PhysReg, imm: i32 },
+    Addi { rd: RvPhysReg, rs1: RvPhysReg, imm: i32 },
     /// メモリの内容をレジスタに書き込む　
-    Ld   { rd: PhysReg, base: PhysReg, offset: i32 }, // 64bit load
+    Ld   { rd: RvPhysReg, base: RvPhysReg, offset: i32 }, // 64bit load
     /// メモリの内容をレジスタに書き込む　
-    Lw   { rd: PhysReg, base: PhysReg, offset: i32 }, // 32bit load
+    Lw   { rd: RvPhysReg, base: RvPhysReg, offset: i32 }, // 32bit load
 
     /// レジスタ指すアドレスにjumpする命令
-    Jalr { rd: PhysReg, base: PhysReg, offset: i32 },
+    Jalr { rd: RvPhysReg, base: RvPhysReg, offset: i32 },
     /// jal rd, label
     /// rd に戻り先アドレス(PC+4)を保存し、label の位置へジャンプする
-    Jal { rd: PhysReg, label: String },
+    Jal { rd: RvPhysReg, label: String },
     J { label: String },  // jal zero, label
-    Bnez { rs1: PhysReg, label: String },
+    Bnez { rs1: RvPhysReg, label: String },
     
     // --- S-Type (ストア) ---
     /// レジスタの内容をメモリに書き込む
-    Sd   { rs2: PhysReg, base: PhysReg, offset: i32 }, // 64bit store
+    Sd   { rs2: RvPhysReg, base: RvPhysReg, offset: i32 }, // 64bit store
     /// レジスタの内容をメモリに書き込む
-    Sw   { rs2: PhysReg, base: PhysReg, offset: i32 }, // 32bit store
+    Sw   { rs2: RvPhysReg, base: RvPhysReg, offset: i32 }, // 32bit store
 
     // --- 疑似命令 (Pseudo Instructions) ---
     // ※将来ELFを出力する際は、ここで複数のネイティブ命令に展開（Lowering）します
     /// 定数をレジスタにセットする
-    Li   { rd: PhysReg, imm: i64 },
-    Mv   { rd: PhysReg, rs: PhysReg },
+    Li   { rd: RvPhysReg, imm: i64 },
+    Mv   { rd: RvPhysReg, rs: RvPhysReg },
     Call { symbol: String },
     Ret,
 }

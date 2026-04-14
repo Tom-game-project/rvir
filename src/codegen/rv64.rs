@@ -6,7 +6,7 @@ use crate::codegen::rv64_asm::*;
 pub struct NaiveAllocator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhysReg {
+pub enum RvPhysReg {
     T0/*Reserved*/, T1, T2, T3, T4, T5, T6, // temp reg
     S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, // save reg
     A0, A1, A2, A3, A4, A5, A6, A7, // function args
@@ -16,7 +16,22 @@ pub enum PhysReg {
     Ra, // return addr
 }
 
-impl PhysReg {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BasePointer {
+    Sp(i32), // stack pointer
+    Fp(i32), // frame pointer
+}
+
+impl BasePointer {
+    pub fn get_base_and_offset(&self) -> (RvPhysReg, i32) {
+        match self {
+            BasePointer::Sp(offset) => (RvPhysReg::Sp, *offset),
+            BasePointer::Fp(offset) => (RvPhysReg::Fp, *offset),
+        }
+    }
+}
+
+impl RvPhysReg {
     pub fn get_reg_name(&self) -> &'static str {
         match &self {
             Self::T0 => "t0",
@@ -52,7 +67,7 @@ impl PhysReg {
         }
     }
 
-    pub fn gen_load_asm(&self, location: &Location) -> Result<Asm, GenAsmErr> {
+    pub fn gen_load_asm(&self, location: &Location<RvPhysReg, RvPhysStack>) -> Result<Asm, GenAsmErr> {
         match location {
             Location::Register(reg) => {
                 // Ok(Asm(format!("mv {}, {}\n", self.get_reg_name(), reg.get_reg_name())))
@@ -63,17 +78,17 @@ impl PhysReg {
 
                     match other_stack.offset {
                         BasePointer::Sp(offset) => 
-                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Lw { rd: *self, base: PhysReg::Sp, offset })]}),
+                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Lw { rd: *self, base: RvPhysReg::Sp, offset })]}),
                         BasePointer::Fp(offset) => 
-                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Lw { rd: *self, base: PhysReg::Fp, offset })]}),
+                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Lw { rd: *self, base: RvPhysReg::Fp, offset })]}),
                     }
                 } else if other_stack.size == Size::new(8) {
 
                     match other_stack.offset {
                         BasePointer::Sp(offset) => 
-                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Ld { rd: *self, base: PhysReg::Sp, offset })]}),
+                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Ld { rd: *self, base: RvPhysReg::Sp, offset })]}),
                         BasePointer::Fp(offset) => 
-                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Ld { rd: *self, base: PhysReg::Fp, offset })]}),
+                            Ok(Asm{ statements: vec![AsmStatement::Instruction(RvInst::Ld { rd: *self, base: RvPhysReg::Fp, offset })]}),
                     }
                 } else {
                     Err(GenAsmErr::UnsupportedByteAlignment)
@@ -97,17 +112,19 @@ impl PhysReg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PhysStack {
+pub struct RvPhysStack {
     offset: BasePointer,
     size: Byte       // 4 byte or 8 byte
 }
 
-impl PhysStack {
+impl RvPhysStack {
     pub fn new(offset: BasePointer, size:Byte) -> Self {
         Self { offset, size }
     }
 
-    pub fn gen_load_asm(&self, location: &Location) -> Result<Asm, GenAsmErr> {
+    pub fn gen_load_asm(&self, location: &Location<RvPhysReg, RvPhysStack>) -> Result<Asm, GenAsmErr> 
+        
+    {
         let (self_base, self_offset) = self.offset.get_base_and_offset();
 
         match location {
@@ -118,8 +135,8 @@ impl PhysStack {
                     Ok(
                         Asm { 
                             statements: vec![
-                                AsmStatement::Instruction( RvInst::Lw { rd: PhysReg::T0, base: other_base, offset: other_offset },),
-                                AsmStatement::Instruction( RvInst::Sw { rs2: PhysReg::T0, base: self_base, offset: self_offset },)
+                                AsmStatement::Instruction( RvInst::Lw { rd: RvPhysReg::T0, base: other_base, offset: other_offset },),
+                                AsmStatement::Instruction( RvInst::Sw { rs2: RvPhysReg::T0, base: self_base, offset: self_offset },)
                             ]
                         }
                     )
@@ -127,8 +144,8 @@ impl PhysStack {
                     Ok(
                         Asm { 
                             statements: vec![
-                                AsmStatement::Instruction( RvInst::Ld { rd: PhysReg::T0, base: other_base, offset: other_offset },),
-                                AsmStatement::Instruction( RvInst::Sd { rs2: PhysReg::T0, base: self_base, offset: self_offset },)
+                                AsmStatement::Instruction( RvInst::Ld { rd: RvPhysReg::T0, base: other_base, offset: other_offset },),
+                                AsmStatement::Instruction( RvInst::Sd { rs2: RvPhysReg::T0, base: self_base, offset: self_offset },)
                             ]
                         }
                     )
@@ -163,29 +180,29 @@ impl PhysStack {
             ConstValue::I32(a) => 
                 Asm {
                     statements: vec![
-                        AsmStatement::Instruction(RvInst::Li { rd: PhysReg::T0, imm: *a as i64 }),
-                        AsmStatement::Instruction(RvInst::Sw { rs2: PhysReg::T0, base: self_base, offset: self_offset })
+                        AsmStatement::Instruction(RvInst::Li { rd: RvPhysReg::T0, imm: *a as i64 }),
+                        AsmStatement::Instruction(RvInst::Sw { rs2: RvPhysReg::T0, base: self_base, offset: self_offset })
                     ]
                 },
             ConstValue::I64(a) => 
                 Asm {
                     statements: vec![
-                        AsmStatement::Instruction(RvInst::Li { rd: PhysReg::T0, imm: *a as i64 }),
-                        AsmStatement::Instruction(RvInst::Sd { rs2: PhysReg::T0, base: self_base, offset: self_offset })
+                        AsmStatement::Instruction(RvInst::Li { rd: RvPhysReg::T0, imm: *a as i64 }),
+                        AsmStatement::Instruction(RvInst::Sd { rs2: RvPhysReg::T0, base: self_base, offset: self_offset })
                     ]
                 },
             ConstValue::U32(a) => 
                 Asm {
                     statements: vec![
-                        AsmStatement::Instruction(RvInst::Li { rd: PhysReg::T0, imm: *a as i64 }),
-                        AsmStatement::Instruction(RvInst::Sw { rs2: PhysReg::T0, base: self_base, offset: self_offset })
+                        AsmStatement::Instruction(RvInst::Li { rd: RvPhysReg::T0, imm: *a as i64 }),
+                        AsmStatement::Instruction(RvInst::Sw { rs2: RvPhysReg::T0, base: self_base, offset: self_offset })
                     ]
                 },
             ConstValue::U64(a) => 
                 Asm {
                     statements: vec![
-                        AsmStatement::Instruction(RvInst::Li { rd: PhysReg::T0, imm: *a as i64 }),
-                        AsmStatement::Instruction(RvInst::Sd { rs2: PhysReg::T0, base: self_base, offset: self_offset })
+                        AsmStatement::Instruction(RvInst::Li { rd: RvPhysReg::T0, imm: *a as i64 }),
+                        AsmStatement::Instruction(RvInst::Sd { rs2: RvPhysReg::T0, base: self_base, offset: self_offset })
                     ]
                 },
         }
@@ -196,11 +213,11 @@ fn aligned0x10 (size: u64) -> u64 {
     (size + 0xf) & !0xf
 }
 
-impl RegisterAllocator for NaiveAllocator {
+impl RegisterAllocator<RvPhysReg, RvPhysStack> for NaiveAllocator {
     fn allocate(
             &mut self,
             _ir: &RvIR,
-            arena: &mut VregArena,
+            arena: &mut VregArena<RvPhysReg, RvPhysStack>,
             args: &[VReg],
         ) -> Byte {
             let mut current_offset = - 0x10 /* return addr and frame pointer */;
@@ -215,7 +232,7 @@ impl RegisterAllocator for NaiveAllocator {
                     current_offset -= 8 /* byte */; // 引数のサイズによらず固定
                     arg_data.location = Some(
                         Location::Stack(
-                            PhysStack::new(
+                            RvPhysStack::new(
                                 BasePointer::Fp(current_offset), 
                                 arg_data.size.clone()
                             )
@@ -226,7 +243,7 @@ impl RegisterAllocator for NaiveAllocator {
                     // 呼ばれる側で、どのようにアクセスすればいいか？
                     arg_data.location = Some(
                         Location::Stack(
-                            PhysStack::new(
+                            RvPhysStack::new(
                                 BasePointer::Fp(spillout_offset), 
                                 arg_data.size.clone()
                             )
@@ -242,7 +259,7 @@ impl RegisterAllocator for NaiveAllocator {
                     current_offset -= vreg_data.size.value as i32;
                     vreg_data.location = Some(
                         Location::Stack(
-                            PhysStack::new(
+                            RvPhysStack::new(
                                 BasePointer::Fp(current_offset), 
                                 vreg_data.size.clone()
                             )
@@ -256,11 +273,24 @@ impl RegisterAllocator for NaiveAllocator {
     }
 }
 
+impl GenLoadAsm<RvPhysReg, RvPhysStack, Asm, GenAsmErr> for Location<RvPhysReg, RvPhysStack> {
+    fn gen_load_asm(&self, location: &Location<RvPhysReg, RvPhysStack>) -> Result<Asm, GenAsmErr> {
+        match self {
+            Location::Stack(phys_stack) => {
+                phys_stack.gen_load_asm(&location)
+            }
+            Location::Register(phys_reg) => {
+                phys_reg.gen_load_asm(&location)
+            }
+        }
+    }
+}
+
 ///
 pub fn gen_funcdef(
-    func_def: &mut FuncDef,
+    func_def: &mut FuncDef<RvPhysReg, RvPhysStack>,
     module_context: &Symbols,
-    allocator: &mut dyn RegisterAllocator,
+    allocator: &mut dyn RegisterAllocator<RvPhysReg, RvPhysStack>,
 ) -> Result<Asm, GenAsmErr> {
     let mut asm_statements:Vec<AsmStatement> = Vec::new();
     // prorogue
@@ -278,10 +308,10 @@ pub fn gen_funcdef(
 
     asm_statements.push(AsmStatement::Label(func_def.name.clone()));
 
-    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size  as i32 * -1 }),);        // スタックを伸ばす
-    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Fp, base: PhysReg::Sp, offset: (aligned_stack_size - 0x10) as i32 })); // 古いfpをスタックに保存する
-    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Fp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);              // fpを更新する
-    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }));                               // retunr addrをスタックに記録する
+    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: RvPhysReg::Sp, rs1: RvPhysReg::Sp, imm: aligned_stack_size  as i32 * -1 }),);        // スタックを伸ばす
+    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: RvPhysReg::Fp, base: RvPhysReg::Sp, offset: (aligned_stack_size - 0x10) as i32 })); // 古いfpをスタックに保存する
+    asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: RvPhysReg::Fp, rs1: RvPhysReg::Sp, imm: aligned_stack_size as i32 }),);              // fpを更新する
+    asm_statements.push(AsmStatement::Instruction(RvInst::Sd   { rs2: RvPhysReg::Ra, base: RvPhysReg::Fp, offset: -0x8 }));                               // retunr addrをスタックに記録する
 
     asm_statements.push(
         AsmStatement::Comment("--- save asm register ---".to_string())
@@ -298,14 +328,14 @@ pub fn gen_funcdef(
         asm_statements = [
             asm_statements,
             match i {
-                0 => location.gen_load_asm(&Location::Register(PhysReg::A0)),
-                1 => location.gen_load_asm(&Location::Register(PhysReg::A1)),
-                2 => location.gen_load_asm(&Location::Register(PhysReg::A2)),
-                3 => location.gen_load_asm(&Location::Register(PhysReg::A3)),
-                4 => location.gen_load_asm(&Location::Register(PhysReg::A4)),
-                5 => location.gen_load_asm(&Location::Register(PhysReg::A5)),
-                6 => location.gen_load_asm(&Location::Register(PhysReg::A6)),
-                7 => location.gen_load_asm(&Location::Register(PhysReg::A7)),
+                0 => location.gen_load_asm(&Location::Register(RvPhysReg::A0)),
+                1 => location.gen_load_asm(&Location::Register(RvPhysReg::A1)),
+                2 => location.gen_load_asm(&Location::Register(RvPhysReg::A2)),
+                3 => location.gen_load_asm(&Location::Register(RvPhysReg::A3)),
+                4 => location.gen_load_asm(&Location::Register(RvPhysReg::A4)),
+                5 => location.gen_load_asm(&Location::Register(RvPhysReg::A5)),
+                6 => location.gen_load_asm(&Location::Register(RvPhysReg::A6)),
+                7 => location.gen_load_asm(&Location::Register(RvPhysReg::A7)),
                 8.. => { Ok(Asm{statements: vec![]}) } // スタックメモリに積まれている
             }?.statements
         ].concat();
@@ -340,7 +370,7 @@ pub fn gen_funcdef(
                 if let Some(a) = val {
                     match a {
                         Operand::Const(c) => {
-                            let asm = PhysReg::A0.gen_load_immediate(c)
+                            let asm = RvPhysReg::A0.gen_load_immediate(c)
                                 .statements;
                             
                             asm_statements = [asm_statements, asm].concat()
@@ -352,7 +382,7 @@ pub fn gen_funcdef(
                                 .unwrap()
                                 .location
                                 .unwrap();
-                            let asm = PhysReg::A0.gen_load_asm(&location)
+                            let asm = RvPhysReg::A0.gen_load_asm(&location)
                                 .unwrap() 
                                 .statements;
                             
@@ -361,16 +391,16 @@ pub fn gen_funcdef(
                     }
                 }
 
-                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Ra, base: PhysReg::Fp, offset: -0x8 }),);                 // メモリからreturn addrを取り出してraにセット
-                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: PhysReg::Fp, base: PhysReg::Fp, offset: -0x10 }));                 // fpを戻す メモリから復元するため、fpは気にしなくても良さそう
-                asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: aligned_stack_size as i32 }),);// スタックを戻す
+                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: RvPhysReg::Ra, base: RvPhysReg::Fp, offset: -0x8 }),);                 // メモリからreturn addrを取り出してraにセット
+                asm_statements.push(AsmStatement::Instruction(RvInst::Ld   { rd: RvPhysReg::Fp, base: RvPhysReg::Fp, offset: -0x10 }));                 // fpを戻す メモリから復元するため、fpは気にしなくても良さそう
+                asm_statements.push(AsmStatement::Instruction(RvInst::Addi { rd: RvPhysReg::Sp, rs1: RvPhysReg::Sp, imm: aligned_stack_size as i32 }),);// スタックを戻す
                 asm_statements.push(AsmStatement::Instruction(RvInst::Ret)); // as same as `jalr zero, 0(ra)`
             }
 
             Instruction::Branch { cond, true_label, false_label } => {
                 let asm = match cond {
                     Operand::Const(c) => {
-                        PhysReg::T0.gen_load_immediate(c)
+                        RvPhysReg::T0.gen_load_immediate(c)
                     }
                     Operand::Reg(vreg) => {
                         let location = func_def
@@ -379,10 +409,10 @@ pub fn gen_funcdef(
                             .unwrap()
                             .location
                             .unwrap();
-                        PhysReg::T0.gen_load_asm(&location)?
+                        RvPhysReg::T0.gen_load_asm(&location)?
                     }
                 };
-                asm_statements.push(AsmStatement::Instruction(RvInst::Bnez { rs1: PhysReg::T0, label: true_label.0.clone() }));
+                asm_statements.push(AsmStatement::Instruction(RvInst::Bnez { rs1: RvPhysReg::T0, label: true_label.0.clone() }));
                 asm_statements.push(AsmStatement::Instruction(RvInst::J { label: false_label.0.clone() }));
             }
 
@@ -395,19 +425,10 @@ pub fn gen_funcdef(
     Ok(Asm { statements: asm_statements })
 }
 
-// frame pointerを入れないアセンブリを出力する
-fn gen_funcdef_without_fp (
-    func_def: &mut FuncDef,
-    module_context: &Symbols,
-    allocator: &mut dyn RegisterAllocator,
-) -> Result<Asm, GenAsmErr> {
-    todo!()
-}
-
 /// generate asm with frame pointer
 pub fn gen_funccall (
     dest:&Option<VReg>, func: &Func, args:&Vec<Operand>,
-    func_def: &FuncDef,
+    func_def: &FuncDef<RvPhysReg, RvPhysStack>,
     module_context: &Symbols,
 ) -> Result<Asm, GenAsmErr> {
     let mut asm_statements:Vec<AsmStatement> = Vec::new();
@@ -429,16 +450,16 @@ pub fn gen_funccall (
             Operand::Const(const_val) => {
                 // all args stored under the fp
                 match i {
-                    0 => PhysReg::A0.gen_load_immediate(const_val),
-                    1 => PhysReg::A1.gen_load_immediate(const_val),
-                    2 => PhysReg::A2.gen_load_immediate(const_val),
-                    3 => PhysReg::A3.gen_load_immediate(const_val),
-                    4 => PhysReg::A4.gen_load_immediate(const_val),
-                    5 => PhysReg::A5.gen_load_immediate(const_val),
-                    6 => PhysReg::A6.gen_load_immediate(const_val),
-                    7 => PhysReg::A7.gen_load_immediate(const_val),
+                    0 => RvPhysReg::A0.gen_load_immediate(const_val),
+                    1 => RvPhysReg::A1.gen_load_immediate(const_val),
+                    2 => RvPhysReg::A2.gen_load_immediate(const_val),
+                    3 => RvPhysReg::A3.gen_load_immediate(const_val),
+                    4 => RvPhysReg::A4.gen_load_immediate(const_val),
+                    5 => RvPhysReg::A5.gen_load_immediate(const_val),
+                    6 => RvPhysReg::A6.gen_load_immediate(const_val),
+                    7 => RvPhysReg::A7.gen_load_immediate(const_val),
                     8.. => 
-                        PhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), const_val.get_size())
+                        RvPhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), const_val.get_size())
                             .gen_load_immediate(const_val)
                 }
             }
@@ -448,16 +469,16 @@ pub fn gen_funccall (
                     let Some (location) = &vreg_data.location else {return Err(GenAsmErr::VregNotLocated)};
                     // all args stored under the fp
                     match i {
-                        0 => PhysReg::A0.gen_load_asm(location),
-                        1 => PhysReg::A1.gen_load_asm(location),
-                        2 => PhysReg::A2.gen_load_asm(location),
-                        3 => PhysReg::A3.gen_load_asm(location),
-                        4 => PhysReg::A4.gen_load_asm(location),
-                        5 => PhysReg::A5.gen_load_asm(location),
-                        6 => PhysReg::A6.gen_load_asm(location),
-                        7 => PhysReg::A7.gen_load_asm(location),
+                        0 => RvPhysReg::A0.gen_load_asm(location),
+                        1 => RvPhysReg::A1.gen_load_asm(location),
+                        2 => RvPhysReg::A2.gen_load_asm(location),
+                        3 => RvPhysReg::A3.gen_load_asm(location),
+                        4 => RvPhysReg::A4.gen_load_asm(location),
+                        5 => RvPhysReg::A5.gen_load_asm(location),
+                        6 => RvPhysReg::A6.gen_load_asm(location),
+                        7 => RvPhysReg::A7.gen_load_asm(location),
                         8.. => 
-                            PhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), vreg_data.size)
+                            RvPhysStack::new(BasePointer::Sp(-(spillout_size as i32 - 8 /* byte */ * (i - 8 /*args*/) as i32)), vreg_data.size)
                                 .gen_load_asm(location)
 
                     }?
@@ -470,7 +491,7 @@ pub fn gen_funccall (
     }
 
     asm_statements.push(
-        AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: -1 * spillout_size as i32 })
+        AsmStatement::Instruction(RvInst::Addi { rd: RvPhysReg::Sp, rs1: RvPhysReg::Sp, imm: -1 * spillout_size as i32 })
     );
 
     // 関数の呼び出し
@@ -487,7 +508,7 @@ pub fn gen_funccall (
 
     // spを元の状態に戻す
     asm_statements.push(
-        AsmStatement::Instruction(RvInst::Addi { rd: PhysReg::Sp, rs1: PhysReg::Sp, imm: spillout_size as i32 })
+        AsmStatement::Instruction(RvInst::Addi { rd: RvPhysReg::Sp, rs1: RvPhysReg::Sp, imm: spillout_size as i32 })
     );
 
     // asm_statements
@@ -503,7 +524,7 @@ pub fn gen_funccall (
             vreg_data
                 .location
                 .unwrap()
-                .gen_load_asm(&Location::Register(PhysReg::A0))
+                .gen_load_asm(&Location::Register(RvPhysReg::A0))
                 .unwrap()
                 .statements 
         ]
@@ -515,13 +536,13 @@ pub fn gen_funccall (
 
 pub fn gen_binop (
     op: &Operator, dest: &VReg, lhs: &Operand, rhs: &Operand,
-    func_def: &FuncDef,
+    func_def: &FuncDef<RvPhysReg, RvPhysStack>,
 ) -> Result<Asm, GenAsmErr> {
     let mut statements = Vec::new();
 
     // 1. LHS を汎用の一時レジスタ(t0)にロードする
     let lhs_asm = match lhs {
-        Operand::Const(c) => PhysReg::T0.gen_load_immediate(c),
+        Operand::Const(c) => RvPhysReg::T0.gen_load_immediate(c),
         Operand::Reg(v) => {
             let loc = func_def
                 .vreg_arena
@@ -530,14 +551,14 @@ pub fn gen_binop (
                 .location
                 .as_ref()
                 .unwrap();
-            PhysReg::T0.gen_load_asm(loc)?
+            RvPhysReg::T0.gen_load_asm(loc)?
         }
     };
     statements.extend(lhs_asm.statements);
 
     // 2. RHS を別の一時レジスタ(t1)にロードする
     let rhs_asm = match rhs {
-        Operand::Const(c) => PhysReg::T1.gen_load_immediate(c),
+        Operand::Const(c) => RvPhysReg::T1.gen_load_immediate(c),
         Operand::Reg(v) => {
             let loc = func_def
                 .vreg_arena
@@ -546,7 +567,7 @@ pub fn gen_binop (
                 .location
                 .as_ref()
                 .unwrap();
-            PhysReg::T1.gen_load_asm(loc)?
+            RvPhysReg::T1.gen_load_asm(loc)?
         }
     };
     statements.extend(rhs_asm.statements);
@@ -555,9 +576,9 @@ pub fn gen_binop (
     match op {
         Operator::Add => {
             statements.push(AsmStatement::Instruction(RvInst::Add {
-                rd: PhysReg::T0,
-                rs1: PhysReg::T0,
-                rs2: PhysReg::T1,
+                rd: RvPhysReg::T0,
+                rs1: RvPhysReg::T0,
+                rs2: RvPhysReg::T1,
             }));
         }
         // 将来 Sub や Mul が増えても、ここを1行増やすだけで対応できます！
@@ -571,8 +592,8 @@ pub fn gen_binop (
     // 既存の gen_load_asm を「代入」として活用します。
     // (PhysStack 側の実装で、Register を渡すと sw/sd になるように作られているため完璧に動きます)
     let store_asm = match dest_location {
-        Location::Stack(stack) => stack.gen_load_asm(&Location::Register(PhysReg::T0))?,
-        Location::Register(reg) => reg.gen_load_asm(&Location::Register(PhysReg::T0))?,
+        Location::Stack(stack) => stack.gen_load_asm(&Location::Register(RvPhysReg::T0))?,
+        Location::Register(reg) => reg.gen_load_asm(&Location::Register(RvPhysReg::T0))?,
     };
     statements.extend(store_asm.statements);
 
@@ -589,7 +610,7 @@ pub fn gen_binop (
 
 #[cfg(test)]
 mod rv64_codegen_test {
-    use crate::codegen::rv64::gen_funcdef;
+    use crate::codegen::rv64::{RvPhysReg, RvPhysStack, gen_funcdef};
     use crate::ir::ir::{BasicBlockList, ConstValue, Func, FuncDef, Instruction, Label, ModuleContext, Operand, Operator, RvIR};
     use crate::codegen::rv64::NaiveAllocator;
     use crate::unit::size::Byte;
@@ -913,7 +934,7 @@ mod rv64_codegen_test {
 
     #[test]
     fn test04 () {
-        let mut mod_ctx = ModuleContext::new();
+        let mut mod_ctx = ModuleContext::<RvPhysReg, RvPhysStack>::new();
 
         let func_id = mod_ctx.create_func(
             "test_func",

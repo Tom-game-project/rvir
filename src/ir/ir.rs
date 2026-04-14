@@ -7,13 +7,13 @@ use crate::unit::size::Byte;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VReg(pub usize);
 
-pub trait RegisterAllocator {
+pub trait RegisterAllocator<R, S> {
     /// Analyze the IR and argument information, and assign a Location to every VReg in VregArena.
     /// It returns the final 16-byte-aligned stack size.
     fn allocate(
         &mut self,
         ir: &RvIR,
-        arena: &mut VregArena,
+        arena: &mut VregArena<R, S>,
         args: &[VReg],
     ) -> Byte;
 }
@@ -40,45 +40,23 @@ impl ConstValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BasePointer {
-    Sp(i32), // stack pointer
-    Fp(i32), // frame pointer
-}
-
-impl BasePointer {
-    pub fn get_base_and_offset(&self) -> (PhysReg, i32) {
-        match self {
-            BasePointer::Sp(offset) => (PhysReg::Sp, *offset),
-            BasePointer::Fp(offset) => (PhysReg::Fp, *offset),
-        }
-    }
-}
-
-// TODO
-use crate::codegen::rv64::{PhysReg, PhysStack};
-use crate::codegen::rv64_asm::*; 
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Location {
-    Register(PhysReg),
-    Stack(PhysStack), // frame offset
+pub enum Location<R, S> {
+    Register(R),
+    Stack(S), // frame offset
                       // fp base
 }
 
-impl Location {
-    pub fn gen_load_asm(&self, other: &Location) -> Result<Asm, GenAsmErr> {
-        match self {
-            Location::Stack(phys_stack) => phys_stack.gen_load_asm(other),
-            Location::Register(phys_reg) => phys_reg.gen_load_asm(other)
-        }
-    }
+/// あるデータを、自身にロードする命令の機械語を出力する
+pub trait GenLoadAsm<R, S, A /*Asm*/, E> {
+    fn gen_load_asm(&self, location: &Location<R, S>) -> Result<A, E>;
 }
 
-pub struct VRegData {
+pub struct VRegData<R, V> {
     pub v_reg: VReg,
     pub name: String,
     pub size: Byte,
-    pub location: Option<Location> // TODO
+    // pub location: Option<IrLocation> // TODO
+    pub location: Option<Location<R, V>>
                                    // in the future, I try to optimize this alloc by using register
 }
 
@@ -99,11 +77,11 @@ pub enum GenAsmErr {
     NotImplimentedYet,
 }
 
-pub struct VregArena {
-    pub regs: Vec<VRegData>
+pub struct VregArena<R, V> {
+    pub regs: Vec<VRegData<R, V>>
 }
 
-impl VregArena {
+impl<R, V> VregArena<R, V> {
 
     pub fn alloc(&mut self, size: Byte, name: Option<String>) -> VReg {
         let v_reg = VReg(self.regs.len());
@@ -117,7 +95,7 @@ impl VregArena {
         v_reg
     }
 
-    pub fn get_vregdata(&self, vreg: &VReg) -> Option<&VRegData> {
+    pub fn get_vregdata(&self, vreg: &VReg) -> Option<&VRegData<R, V>> {
         Some(self
             .regs
             .iter()
@@ -1035,18 +1013,18 @@ pub enum Instruction {
 pub struct RvIR (pub Vec<Instruction>);
 
 // Func Definition
-pub struct FuncDef {
+pub struct FuncDef<R, V> {
     pub name: String, // name of function
     func_id: FuncId,
     pub args: Vec<VReg>,
     pub arg_size: Byte,
     pub local_size: Byte, // local value size
 
-    pub vreg_arena: VregArena,
+    pub vreg_arena: VregArena<R, V>,
     pub ir: RvIR,
 }
 
-impl FuncDef {
+impl<R, V> FuncDef<R, V> {
     pub fn new (
         name: &str,
         arg_size: Byte /*byte*/, 
@@ -1080,12 +1058,12 @@ pub struct Symbols (
 );
 
 // Set of functions
-pub struct ModuleContext {
+pub struct ModuleContext<R, S> {
     pub symbols: Symbols,
-    pub funcs: Vec<FuncDef>
+    pub funcs: Vec<FuncDef<R, S>>
 }
 
-impl ModuleContext { 
+impl<R, S> ModuleContext<R, S> { 
 
     pub fn new() -> Self { Self { symbols: Symbols(HashMap::new()), funcs: vec![] } }
 
@@ -1107,7 +1085,7 @@ impl ModuleContext {
         func_id
     }
 
-    pub fn add_func(&mut self, mut func_def: FuncDef) -> FuncId {
+    pub fn add_func(&mut self, mut func_def: FuncDef<R, S>) -> FuncId {
         let func_id = FuncId(self.funcs.len());
         func_def.func_id = func_id;
         self.symbols.0.insert(func_id, func_def.name.clone());
@@ -1117,11 +1095,11 @@ impl ModuleContext {
         func_id
     }
 
-    pub fn get_func_mut(&mut self, id: FuncId) -> Option<&mut FuncDef> {
+    pub fn get_func_mut(&mut self, id: FuncId) -> Option<&mut FuncDef<R, S>> {
         self.funcs.get_mut(id.0)
     }
 
-    pub fn get_func(&self, id: FuncId) -> Option<&FuncDef> {
+    pub fn get_func(&self, id: FuncId) -> Option<&FuncDef<R, S>> {
         self.funcs.get(id.0)
     }
 }
