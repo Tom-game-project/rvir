@@ -151,7 +151,6 @@ pub enum Operand {
 
 pub type Dest = VReg;
 
-use std::collections::HashSet;
 
 pub struct Setting;
 /// IRの設定が終了
@@ -184,6 +183,7 @@ impl BasicBlockList<Setting> {
                 succ: Vec::new(), 
                 insts: Vec::new(), 
                 dom: Vec::new(),
+                idom: None,
                 vreg_state_set: VregStateSet { 
                     reach: Vec::new(),
                     live: Vec::new(),
@@ -262,9 +262,11 @@ fn labelmap2idmap(
 
 /// 命令列に基づいて、文の集合のuse(x)やdef(x)を定義する
 
-/// IRの設定が終わったときに存在するメソッド
-impl BasicBlockList<IRSetted> {
+pub trait BlockListState {}
+impl BlockListState for IRSetted {}
+impl BlockListState for AllSetted {}
 
+impl<T: BlockListState> BasicBlockList<T> {
     pub fn get_basic_block(&self, id: BasicBlockId) -> &BasicBlock {
         &self.list[id.0]
     }
@@ -272,6 +274,10 @@ impl BasicBlockList<IRSetted> {
     pub fn get_basic_block_by_label(&self, label: &Label) -> Option<&BasicBlock> {
         self.list.iter().find(|b | b.label == *label)
     }
+}
+
+/// IRの設定が終わったときに存在するメソッド
+impl BasicBlockList<IRSetted> {
 
     // vreg_state_set setup functions
 
@@ -521,6 +527,18 @@ impl BasicBlockList<IRSetted> {
         }
     }
 
+    fn setup_idom(&mut self) {
+        let mut idoms = Vec::new();
+
+        for i in &self.list {
+            idoms.push(i.get_immediately_dominate(&self));
+        }
+
+        for (basic_block, idom) in self.list.iter_mut().zip(idoms) {
+            basic_block.idom = idom;
+        }
+    }
+
     /// できればBasicBlockListの状態を変えてirを再設定できないようにする
     ///
     /// ir設定後　呼び出されることを想定する
@@ -581,7 +599,9 @@ impl BasicBlockList<IRSetted> {
         self.setup_kill_dash_set();
         self.setup_live_set();
 
+        // 支配関係の導出
         self.setup_dom();
+        self.setup_idom();
 
         Ok(BasicBlockList {
             list: self.list,
@@ -602,14 +622,16 @@ impl BasicBlockId {
     pub fn new(id: usize) -> Self {
         Self(id)
     }
+
+    #[cfg(debug_assertions)]
+    pub fn get_basic_block_name(&self, basic_block_list: &BasicBlockList<AllSetted>) -> Label {
+        basic_block_list.list[self.0].label.clone()
+    }
 }
 
 // =================================================================================
 //                         到達する定義、生存区間解析用構造体
 // =================================================================================
-
-struct StatementSetting;
-struct StatementSetted;
 
 /// 使い方
 /// 命令列をみて、VregStatementを`gen_vreg_statement`を使ってセットしていく
@@ -628,6 +650,7 @@ impl StatementList {
         &self.statements[statement_id.0]
     }
 
+    /// 命令をみて、変数の定義、使用をするようなものを文として解釈し、statement_idを割与える
     fn generate_and_set_statement_ids(&mut self, j: &Instruction) -> Option<StatementId> {
         match j { 
             Instruction::Call { dest, func:_func, args } => {
@@ -865,6 +888,7 @@ pub struct BasicBlock {
     pub vreg_state_set: VregStateSet, // 文の集合
     // 自分を支配するブロックの集合
     pub dom: Vec<bool>, // BasicBlockList.listのindexに対応
+    pub idom: Option<BasicBlockId>,
     /// このブロック内に含まれる、変数を操作する文
     pub statement_id_list: Vec<StatementId>,
 }
@@ -903,6 +927,62 @@ impl BasicBlock {
             }
             acc
         })
+    }
+
+    /// selfが引数を厳密に支配しているかどうかを判定するメソッド
+    pub fn is_strictly_dominate(&self, basic_block_id: BasicBlockId) -> bool {
+        self.get_dom_basic_block_ids().contains(&basic_block_id) && self.id != basic_block_id
+    }
+
+    // selfが、与えられたbasic_block_idを支配するかどうか調べる
+    pub fn is_ancestor(&self, basic_block_list: &BasicBlockList<IRSetted>, basic_block_id: BasicBlockId) -> bool {
+        let basic_block = basic_block_list.get_basic_block(basic_block_id);
+
+        basic_block.get_dom_basic_block_ids()
+            .iter()
+            .filter(|br_id| {
+                // let block = basic_block_list.get_basic_block(**br_id);
+                // block.is_strictly_dominate(self.id)
+                **br_id != basic_block_id
+            })
+            .map(|br_id| *br_id)
+            .collect::<Vec<BasicBlockId>>()
+            .contains(&self.id)
+    }
+
+    /// 直接支配(IDOM)を探す
+    pub fn get_immediately_dominate(&self, basic_block_list: &BasicBlockList<IRSetted>) -> Option<BasicBlockId> {
+        // 自分を支配するブロックの集合
+        let dom_myself: Vec<BasicBlockId> = self
+            .get_dom_basic_block_ids()
+            .iter()
+            .filter(|br_id| {
+                // let block = basic_block_list.get_basic_block(**br_id);
+                // block.is_strictly_dominate(self.id)
+                **br_id != self.id
+            })
+            .map(|br_id| *br_id)
+            .collect();
+
+        dom_myself
+            .iter()
+            .copied()
+            .find(|b| {
+                let block = basic_block_list.get_basic_block(*b);
+
+                !dom_myself
+                    .iter()
+                    .filter(|br| *br != b)
+                    .any(|br| {
+                        block.is_ancestor(&basic_block_list, *br)
+                    })
+            })
+
+        // println!("自分のid {:?}", self.id);
+        // println!("自身を支配するブロックたち  {:?}", dom_myself);
+        // println!("idom  {:?}\n", idom);
+
+        // 自分を支配するブロックが、
     }
 }
 
@@ -1003,16 +1083,18 @@ pub struct Symbols (
 pub struct ModuleContext {
     pub symbols: Symbols,
     pub funcs: Vec<FuncDef>
-} impl ModuleContext { 
+}
+
+impl ModuleContext { 
 
     pub fn new() -> Self { Self { symbols: Symbols(HashMap::new()), funcs: vec![] } }
 
     pub fn create_func(&mut self, name: &str, arg_size: Byte, local_size: Byte) -> FuncId {
         let func_id = FuncId(self.funcs.len());
-        
+
         // 1. シンボルテーブルに名前を「先」に登録する
         self.symbols.0.insert(func_id, name.to_string());
-        
+
         // 2. IRが空っぽの（未完成な）FuncDefをリストに追加する
         let empty_func = FuncDef::new(
             name, 

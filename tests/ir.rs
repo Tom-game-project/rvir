@@ -1,8 +1,11 @@
-#[cfg(test)]
+/// ```
+/// cargo test --features test-utils  ir_tests::test03 -- --nocapture
+/// ```
 mod ir_tests {
     use rvir::unit::size::Byte;
     use rvir::ir::ir::{BasicBlockList, ConstValue, Instruction, Label, ModuleContext, Operand, Operator};
 
+    ///
     #[test]
     fn test00 (){
         let mut mod_ctx = ModuleContext::new();
@@ -86,6 +89,7 @@ mod ir_tests {
 
     }
 
+    ///
     #[test]
     fn test01() {
         let mut mod_ctx = ModuleContext::new();
@@ -219,6 +223,110 @@ mod ir_tests {
                     println!("{}:", basic_block.label.0);
                     println!("    basic_block id: {:?}", basic_block.id);
                     println!("    dom {:?}", basic_block.get_dom_basic_block_ids());
+                }
+            } else {
+                println!("failed to setting basic_block_list");
+            }
+        }
+    }
+
+    #[test]
+    fn test03() {
+        let mut mod_ctx = ModuleContext::new();
+
+        let func_id = mod_ctx.create_func(
+            "test_func",
+            Byte::new(0),
+            Byte::new(0x10 * 4));
+
+        {
+            let func = mod_ctx.get_func_mut(func_id).unwrap();
+
+            let mut basic_block_list = BasicBlockList::new();
+
+            let tmp_reg_i = func.vreg_arena.alloc(Byte::new(8), Some(String::from("i")));
+            let tmp_reg_j = func.vreg_arena.alloc(Byte::new(8), Some(String::from("j")));
+            let tmp_reg_k = func.vreg_arena.alloc(Byte::new(8), Some(String::from("k")));
+
+            let tmp_reg_tmp = func.vreg_arena.alloc(Byte::new(8), Some(String::from("tmp")));
+
+            // irのユーザーは事前に基本ブロックを構成する必要がある
+            let block_id_1 = basic_block_list.alloc(Label("block1".to_string()));
+            let block_id_2 = basic_block_list.alloc(Label("block2".to_string()));
+            let block_id_3 = basic_block_list.alloc(Label("block3".to_string()));
+            let block_id_4 = basic_block_list.alloc(Label("block4".to_string()));
+            let block_id_5 = basic_block_list.alloc(Label("block5".to_string()));
+            let block_id_6 = basic_block_list.alloc(Label("block6".to_string()));
+            let block_id_7 = basic_block_list.alloc(Label("block7".to_string()));
+
+            basic_block_list.set_inst(
+                block_id_1,
+                vec![
+                Instruction::Assign { dest: tmp_reg_i, src: Operand::Const(ConstValue::I64(6)) },
+                Instruction::Assign { dest: tmp_reg_j, src: Operand::Const(ConstValue::I64(1)) },
+                Instruction::Assign { dest: tmp_reg_k, src: Operand::Const(ConstValue::I64(1)) },
+
+                Instruction::Jump { target: Label("block2".to_string()) },
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_2,
+                vec![
+                Instruction::BinOp { op: Operator::Neq, dest: tmp_reg_tmp, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Reg(tmp_reg_j) },
+                Instruction::Branch { 
+                    cond: Operand::Reg(tmp_reg_tmp),
+                    true_label: Label("block7".to_string()),
+                    false_label: Label("block3".to_string()),
+                }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_3,
+                vec![
+                Instruction::BinOp { op: Operator::Neq, dest: tmp_reg_tmp, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Const(ConstValue::I64(6)) },
+                Instruction::Branch { 
+                    cond: Operand::Reg(tmp_reg_tmp),
+                    true_label: Label("block4".to_string()),
+                    false_label: Label("block5".to_string()),
+                }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_4,
+                vec![
+                Instruction::Assign { dest: tmp_reg_k, src: Operand::Const(ConstValue::I64(0)) },
+                Instruction::Jump { target: Label("block6".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_5,
+                vec![
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_i, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Const(ConstValue::I64(1)) },
+                Instruction::Jump { target: Label("block6".to_string()) }
+            ]);
+
+            basic_block_list.set_inst(
+                block_id_6,
+                vec![
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_i, lhs: Operand::Reg(tmp_reg_i), rhs: Operand::Reg(tmp_reg_k) },
+                Instruction::BinOp { op: Operator::Add, dest: tmp_reg_j, lhs: Operand::Reg(tmp_reg_j), rhs: Operand::Const(ConstValue::I64(1)) },
+                Instruction::Jump { target: Label("block2".to_string()) }
+            ]);
+
+            let basic_block_list = basic_block_list.finish_ir_setting();
+            if let Ok(basic_block_list) = basic_block_list.set_pred_and_succ() {
+                for basic_block in &basic_block_list.list {
+                    println!("{}:", basic_block.label.0);
+                    println!("    basic_block id: {:?}", basic_block.id.get_basic_block_name(&basic_block_list));
+
+                    if let Some(idom) = basic_block.idom {
+                        println!("    idom {:?}", idom.get_basic_block_name(&basic_block_list));
+                    } else {
+                        println!("    root idom")
+                    }
+                    println!("    dom {:?}", basic_block.get_dom_basic_block_ids().iter().map(|id| 
+                            id.get_basic_block_name(&basic_block_list)
+                    ).collect::<Vec<Label>>());
                 }
             } else {
                 println!("failed to setting basic_block_list");
