@@ -315,6 +315,8 @@ mod ir_tests {
             ]);
 
             let basic_block_list = basic_block_list.finish_ir_setting();
+           
+
             if let Ok(basic_block_list) = basic_block_list.set_pred_and_succ() {
                 for basic_block in &basic_block_list.list {
                     println!("{}:", basic_block.label.0);
@@ -328,6 +330,12 @@ mod ir_tests {
                     println!("    dom {:?}", basic_block.get_dom_basic_block_ids().iter().map(|id| 
                             id.get_basic_block_name(&basic_block_list)
                     ).collect::<Vec<Label>>());
+                }
+
+                if let Ok(idom_tree) = basic_block_list.gen_idom_tree() {
+                    println!("{:#?}", idom_tree);
+                } else {
+                    println!("failed to generate idom tree");
                 }
             } else {
                 println!("failed to setting basic_block_list");

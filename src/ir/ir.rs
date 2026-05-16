@@ -197,6 +197,7 @@ impl BasicBlockList<Setting> {
 }
 
 pub enum BasicBlockListError {
+    RootDoesNotFound,
     UndefinedLabel(Label)
 }
 
@@ -505,6 +506,7 @@ impl BasicBlockList<IRSetted> {
         }
     }
 
+    /// 直接支配の導出
     fn setup_idom(&mut self) {
         let mut idoms = Vec::new();
 
@@ -591,6 +593,39 @@ impl BasicBlockList<IRSetted> {
 }
 
 impl BasicBlockList<AllSetted> {
+    fn gen_idom_tree_root(&self, new_root: &mut IDomTree) -> Result<(), BasicBlockListError> {
+        new_root.children = self.list
+            .iter()
+            .filter(|bb| bb
+                .idom
+                .is_some_and(|bb_id| bb_id == new_root.basic_block_id)
+            )
+            .map(|bb_id| {
+                let mut idom_tree = IDomTree {
+                    basic_block_id: bb_id.id,
+                    children: Vec::new()
+                };
+                self.gen_idom_tree_root(&mut idom_tree)?;
+                Ok(idom_tree)
+            })
+            .collect::<Result<Vec<IDomTree>, BasicBlockListError>>()?;
+        Ok(())
+    }
+
+    /// 支配木を生成する関数
+    pub fn gen_idom_tree(&self) -> Result<IDomTree, BasicBlockListError> {
+        if let Some(root_node) = self.list.iter().find(|bb| bb.idom.is_none()) {
+            let mut root_tree = IDomTree {
+                basic_block_id: root_node.id,
+                children: Vec::new() 
+            };
+            self.gen_idom_tree_root(&mut root_tree)?;
+            return Ok(root_tree);
+        } else {
+            return Err(BasicBlockListError::RootDoesNotFound);
+        }
+    }
+
 }
 
 #[derive(Hash, Copy, Clone, PartialEq, Eq, Debug)]
@@ -710,6 +745,13 @@ pub struct VregStateSet {
     /// KILL'(B)
     /// p(def(x)) ∈ なるpがある 
     kill_dash: Vec<bool>,
+}
+
+/// 支配木
+#[derive(Debug)]
+pub struct IDomTree {
+    pub basic_block_id: BasicBlockId,
+    pub children: Vec<IDomTree>
 }
 
 // VregStateSet helper functions
@@ -866,7 +908,7 @@ pub struct BasicBlock {
     pub vreg_state_set: VregStateSet, // 文の集合
     // 自分を支配するブロックの集合
     pub dom: Vec<bool>, // BasicBlockList.listのindexに対応
-    pub idom: Option<BasicBlockId>,
+    pub idom: Option<BasicBlockId>, // 直接支配
     /// このブロック内に含まれる、変数を操作する文
     pub statement_id_list: Vec<StatementId>,
 }
@@ -891,7 +933,7 @@ impl BasicBlock {
         }
     }
 
-    fn only_contain_my_self(&self, length_of_basic_block_list: usize) -> Vec<bool>{
+    fn only_contain_my_self(&self, length_of_basic_block_list: usize) -> Vec<bool> {
         let mut b = vec![false; length_of_basic_block_list];
         b[self.id.0] = true;
         b
@@ -1029,8 +1071,6 @@ impl<R, V> FuncDef<R, V> {
         name: &str,
         arg_size: Byte /*byte*/, 
         local_size: Byte /*byte*/,
-        // func_id: FuncId,
-        // args: Vec<VReg>
 ) -> Self {
         Self {
             name: name.to_string(),
@@ -1051,7 +1091,6 @@ impl<R, V> FuncDef<R, V> {
         self.args = args;
     }
 }
-
 
 pub struct Symbols (
     pub HashMap<FuncId, String>
