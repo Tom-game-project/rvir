@@ -129,7 +129,6 @@ pub enum Operand {
 
 pub type Dest = VReg;
 
-
 pub struct Setting;
 /// IRの設定が終了
 pub struct IRSetted;
@@ -162,6 +161,7 @@ impl BasicBlockList<Setting> {
                 insts: Vec::new(), 
                 dom: Vec::new(),
                 idom: None,
+                domf: Vec::new(),
                 vreg_state_set: VregStateSet { 
                     reach: Vec::new(),
                     live: Vec::new(),
@@ -196,6 +196,7 @@ impl BasicBlockList<Setting> {
     }
 }
 
+#[derive(Debug)]
 pub enum BasicBlockListError {
     RootDoesNotFound,
     UndefinedLabel(Label)
@@ -248,6 +249,10 @@ impl BlockListState for AllSetted {}
 impl<T: BlockListState> BasicBlockList<T> {
     pub fn get_basic_block(&self, id: BasicBlockId) -> &BasicBlock {
         &self.list[id.0]
+    }
+
+    pub fn get_mut_basic_block(&mut self, id: BasicBlockId) -> &mut BasicBlock {
+        &mut self.list[id.0]
     }
 
     pub fn get_basic_block_by_label(&self, label: &Label) -> Option<&BasicBlock> {
@@ -613,7 +618,7 @@ impl BasicBlockList<AllSetted> {
     }
 
     /// 支配木を生成する関数
-    pub fn gen_idom_tree(&self) -> Result<IDomTree, BasicBlockListError> {
+    fn gen_idom_tree(&self) -> Result<IDomTree, BasicBlockListError> {
         if let Some(root_node) = self.list.iter().find(|bb| bb.idom.is_none()) {
             let mut root_tree = IDomTree {
                 basic_block_id: root_node.id,
@@ -626,6 +631,54 @@ impl BasicBlockList<AllSetted> {
         }
     }
 
+    /// 支配辺境を導出する
+    fn solve_domf(&self, target_idom_tree: &IDomTree) -> Vec<BasicBlockId> {
+        let mut df = Vec::new();
+
+        let basic_block_id = target_idom_tree.basic_block_id;
+        // println!("target basic block id ({:?})", target_idom_tree.basic_block_id);
+
+        df.extend(
+            self.get_basic_block(basic_block_id)
+                .succ
+                .iter()
+                .copied()
+                .filter(|&y| {
+                    self.get_basic_block(y)
+                        .idom
+                        .is_some_and(|i_idom| i_idom != basic_block_id)
+                })
+        );
+
+        df.extend(
+            target_idom_tree.children
+                .iter()
+                .flat_map(|z| self.get_basic_block(z.basic_block_id).domf.iter())
+                .copied()
+                .filter(|&y| {
+                    self.get_basic_block(y)
+                    .idom
+                    .is_some_and(|i_idom| i_idom != basic_block_id) 
+                })
+        );
+        df
+    }
+
+    fn rec_solve_domf(&mut self, root_idom_tree: &IDomTree, curr_idom_node: &IDomTree) {
+        for idmt in &curr_idom_node.children {
+            self.rec_solve_domf(root_idom_tree, idmt);
+        }
+        let df = self.solve_domf(curr_idom_node);
+        let bb = self.get_mut_basic_block(curr_idom_node.basic_block_id);
+        bb.domf = df;
+    }
+
+    /// 支配辺境を求める
+    pub fn setup_domf(&mut self) -> Result<(), BasicBlockListError> {
+        let root_idom_tree = self.gen_idom_tree()?;
+        self.rec_solve_domf(&root_idom_tree, &root_idom_tree);
+        Ok(())
+    }
 }
 
 #[derive(Hash, Copy, Clone, PartialEq, Eq, Debug)]
@@ -749,9 +802,28 @@ pub struct VregStateSet {
 
 /// 支配木
 #[derive(Debug)]
-pub struct IDomTree {
-    pub basic_block_id: BasicBlockId,
-    pub children: Vec<IDomTree>
+struct IDomTree {
+    basic_block_id: BasicBlockId,
+    children: Vec<IDomTree>
+}
+
+impl IDomTree {
+   pub fn find<P>(&self, predicate: P) -> Option<&IDomTree>
+   where
+        // 中身を消費しないので、引数は T ではなく &T にする！
+        P: Fn(&IDomTree) -> bool,
+   {
+       if predicate(self) {
+           Some(self)
+       } else {
+           for i in &self.children {
+               if let Some(ri) = i.find(&predicate) {
+                   return Some(ri);
+               }
+           }
+           return None;
+       }
+   }
 }
 
 // VregStateSet helper functions
@@ -909,6 +981,7 @@ pub struct BasicBlock {
     // 自分を支配するブロックの集合
     pub dom: Vec<bool>, // BasicBlockList.listのindexに対応
     pub idom: Option<BasicBlockId>, // 直接支配
+    pub domf: Vec<BasicBlockId>, // 支配辺境
     /// このブロック内に含まれる、変数を操作する文
     pub statement_id_list: Vec<StatementId>,
 }
@@ -954,7 +1027,7 @@ impl BasicBlock {
         self.get_dom_basic_block_ids().contains(&basic_block_id) && self.id != basic_block_id
     }
 
-    // selfが、与えられたbasic_block_idを支配するかどうか調べる
+    /// selfが、与えられたbasic_block_idを支配するかどうか調べる
     pub fn is_ancestor(&self, basic_block_list: &BasicBlockList<IRSetted>, basic_block_id: BasicBlockId) -> bool {
         let basic_block = basic_block_list.get_basic_block(basic_block_id);
 
@@ -977,8 +1050,6 @@ impl BasicBlock {
             .get_dom_basic_block_ids()
             .iter()
             .filter(|br_id| {
-                // let block = basic_block_list.get_basic_block(**br_id);
-                // block.is_strictly_dominate(self.id)
                 **br_id != self.id
             })
             .map(|br_id| *br_id)
@@ -997,12 +1068,6 @@ impl BasicBlock {
                         block.is_ancestor(&basic_block_list, *br)
                     })
             })
-
-        // println!("自分のid {:?}", self.id);
-        // println!("自身を支配するブロックたち  {:?}", dom_myself);
-        // println!("idom  {:?}\n", idom);
-
-        // 自分を支配するブロックが、
     }
 }
 
